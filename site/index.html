@@ -19,9 +19,8 @@
     </a>
     <nav aria-label="Навигация">
       <a href="#setup">Установка</a>
-      <a href="https://www.youtube.com/@Maklyxa69" target="_blank" rel="noopener noreferrer">YouTube</a>
     </nav>
-    <a class="button outline release-link" href="https://github.com/qqew666/two-windows-in-one/releases/latest">Скачать</a>
+    <a class="button outline release-link" href="https://github.com/qqew666/wo-Windows-in-One/releases/latest">Скачать</a>
   </header>
 
   <main class="shell">
@@ -32,7 +31,7 @@
         <p class="intro">Оставьте первое окно открытым, а второе запустите в Windows Sandbox с отдельными настройками и данными.</p>
         <div class="hero-actions">
           <a class="button primary" href="#access">Получить ключ</a>
-          <a class="button outline release-link" href="https://github.com/qqew666/two-windows-in-one/releases/latest">Скачать для Windows</a>
+          <a class="button outline release-link" href="https://github.com/qqew666/wo-Windows-in-One/releases/latest">Скачать для Windows</a>
         </div>
       </div>
 
@@ -60,15 +59,29 @@
       <div>
         <p class="section-label">Активация</p>
         <h2 id="access-title">Ключ на сутки</h2>
-        <p>Каждый день в 00:00 по Москве появляется новый ключ. Скопируйте его и вставьте в приложение.</p>
+        <p>Пройдите CAPTCHA, скопируйте ключ и вставьте его в приложение. Новый ключ появляется в полночь по Москве.</p>
       </div>
       <div class="key-tool">
-        <label for="key">Сегодняшний ключ</label>
-        <div class="key-row">
-          <input id="key" type="text" readonly placeholder="•••• •••• •••• ••••" spellcheck="false" autocomplete="off" aria-describedby="key-status">
-          <button class="button primary" id="key-action" type="button">Показать ключ</button>
+        <button class="button primary" id="open-captcha" type="button">Пройти CAPTCHA</button>
+        <form id="captcha" hidden>
+          <label for="answer">Введите шесть символов с картинки</label>
+          <div class="captcha-image-row">
+            <img id="captcha-image" alt="Шесть символов CAPTCHA" width="260" height="84">
+            <button class="button outline" id="refresh-captcha" type="button">Другая картинка</button>
+          </div>
+          <div class="key-row">
+            <input id="answer" type="text" required maxlength="6" spellcheck="false" autocomplete="off" autocapitalize="characters" aria-describedby="key-status">
+            <button class="button primary" id="submit-answer" type="submit">Получить ключ</button>
+          </div>
+        </form>
+        <div id="key-result" hidden>
+          <label for="key">Сегодняшний ключ</label>
+          <div class="key-row">
+            <input id="key" type="text" readonly spellcheck="false" autocomplete="off" aria-describedby="key-status">
+            <button class="button primary" id="copy-key" type="button">Скопировать</button>
+          </div>
         </div>
-        <p class="key-status" id="key-status" role="status" aria-live="polite">Один ключ действует до ближайшей полуночи по Москве.</p>
+        <p class="key-status" id="key-status" role="status" aria-live="polite">Ключ действует до ближайшей полуночи по Москве.</p>
       </div>
     </section>
 
@@ -83,7 +96,7 @@
         </li>
         <li>
           <h3>Активируйте приложение</h3>
-          <p>Скачайте сборку для Windows x64, распакуйте архив, запустите TwoWindowsInOne.exe и вставьте ключ с этой страницы.</p>
+          <p>Скачайте сборку для Windows x64, распакуйте архив, запустите TwoWindowsInOne.exe и вставьте ключ, полученный на этой странице.</p>
         </li>
         <li>
           <h3>Выберите программу</h3>
@@ -97,8 +110,7 @@
   <footer class="shell footer">
     <span>Two Windows in One</span>
     <div>
-      <a class="repo-link" href="https://github.com/qqew666/two-windows-in-one">GitHub</a>
-      <a href="https://www.youtube.com/@Maklyxa69" target="_blank" rel="noopener noreferrer">@Maklyxa69</a>
+      <a class="repo-link" href="https://github.com/qqew666/wo-Windows-in-One">GitHub</a>
     </div>
   </footer>
 </body>

@@ -5,3 +5,6 @@ site/keys.json
 *.key
 *.private.pem
 app/site-url.txt
+node_modules/
+.dev.vars*
+.openai/

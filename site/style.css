@@ -139,3 +139,9 @@ h2 { font-size: clamp(1.9rem, 3.9vw, 2.7rem); letter-spacing: -.055em; line-heig
 }
 
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+[hidden] { display: none !important; }
+.captcha-image-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+.captcha-image-row img { display: block; max-width: 100%; height: auto; border-radius: 9px; }
+.captcha-image-row .button { min-height: 36px; padding: 5px 12px; }
+#answer { text-transform: uppercase; }

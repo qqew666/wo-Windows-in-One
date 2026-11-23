@@ -200,7 +200,7 @@ internal sealed class MainForm : Form
     {
         using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("Twi.SiteUrl");
         using var reader = stream is null ? null : new StreamReader(stream);
-        return reader?.ReadToEnd().Trim() ?? "https://qqew666.github.io/two-windows-in-one/";
+        return reader?.ReadToEnd().Trim() ?? "https://qqew666.github.io/wo-Windows-in-One/";
     }
 
     private void OpenUrl(string url)
