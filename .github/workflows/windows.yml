@@ -20,12 +20,12 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Configure site and publish
         env:
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
           CUSTOM_SITE_URL: ${{ vars.TWI_SITE_URL }}
         run: |
           test -s app/license-public.pem
-          printf '%s\n' "${CUSTOM_SITE_URL:-https://${REPO_OWNER,,}.github.io/${REPO_NAME}/}" > app/site-url.txt
+          if [[ -n "$CUSTOM_SITE_URL" ]]; then
+            printf '%s\n' "$CUSTOM_SITE_URL" > app/site-url.txt
+          fi
           dotnet publish app/TwoWindowsInOne.csproj -c Release -r win-x64 --self-contained true \
             -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true \
             -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o dist/windows
