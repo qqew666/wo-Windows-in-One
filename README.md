@@ -22,11 +22,11 @@
 Установите стабильный Rust и средства сборки Visual Studio с поддержкой C++. Затем из корня репозитория выполните:
 
 ```powershell
-cargo test --locked --manifest-path app/Cargo.toml
-cargo build --locked --release --manifest-path app/Cargo.toml
+cargo test --locked --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
+cargo build --locked --release --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
 ```
 
-Готовый файл появится в `app/target/release/TwoWindowsInOne.exe`. GitHub Actions проверяет запуск и отсоединение тестового окна из отдельного процесса и публикует архив при отправке тега версии.
+Готовый файл появится в `app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe`. GitHub Actions проверяет запуск и отсоединение тестового окна из отдельного процесса и публикует архив при отправке тега версии.
 
 ## Сайт
 

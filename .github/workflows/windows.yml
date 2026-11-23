@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    paths: [app/**, site/logo.png, .github/workflows/windows.yml]
+    paths: [app/**, .cargo/config.toml, site/logo.png, .github/workflows/windows.yml]
   workflow_dispatch:
 
 permissions:
@@ -19,12 +19,12 @@ jobs:
       - name: Install stable Rust
         run: rustup update stable
       - name: Test Rust app on Windows
-        run: cargo +stable test --locked --manifest-path app/Cargo.toml
+        run: cargo +stable test --locked --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
       - name: Build Windows x64 release
         run: |
-          cargo +stable build --locked --release --manifest-path app/Cargo.toml
+          cargo +stable build --locked --release --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive -Path app/target/release/TwoWindowsInOne.exe -DestinationPath dist/Two-Windows-in-One-win-x64.zip
+          Compress-Archive -Path app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe -DestinationPath dist/Two-Windows-in-One-win-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Two-Windows-in-One-win-x64
