@@ -63,30 +63,51 @@ impl Application {
             ],
         }
     }
+}
 
-    #[cfg(windows)]
-    pub fn launch(self, path: &Path, data: &Path) -> io::Result<Child> {
-        let canonical = fs::canonicalize(path)?;
-        if !canonical.is_file() || Self::detect(&canonical).map(|app| app.kind) != Some(self.kind) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Выберите исполняемый файл поддерживаемой программы.",
-            ));
-        }
+pub fn extension_is(path: &Path, expected: &str) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
 
-        // The app family and full path keep installations and channels in separate profiles.
+#[cfg(windows)]
+pub fn name(path: &Path) -> String {
+    Application::detect(path)
+        .map(|app| app.name.to_owned())
+        .unwrap_or_else(|| {
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned()
+        })
+}
+
+#[cfg(windows)]
+pub fn launch(path: &Path, data: &Path) -> io::Result<Child> {
+    let canonical = fs::canonicalize(path)?;
+    if !canonical.is_file() || !extension_is(&canonical, "exe") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Выберите исполняемый файл .exe.",
+        ));
+    }
+
+    let mut command = Command::new(&canonical);
+    if let Some(directory) = canonical.parent() {
+        command.current_dir(directory);
+    }
+    if let Some(application) = Application::detect(&canonical) {
+        // Maintain the same directory for profiles created by earlier releases.
         let identifier = Sha256::digest(canonical.to_string_lossy().to_lowercase().as_bytes());
         let profile = data.join("Profiles").join(format!("{identifier:x}"));
         fs::create_dir_all(&profile)?;
-
-        let mut command = Command::new(canonical);
         command
-            .args(self.arguments(&profile))
+            .args(application.arguments(&profile))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        command.spawn()
     }
+    command.spawn()
 }
 
 #[cfg(windows)]
@@ -121,5 +142,7 @@ mod tests {
         );
         assert_eq!(arguments[3], dir.join("extensions").as_os_str());
         assert!(Application::detect(Path::new("setup.exe")).is_none());
+        assert!(extension_is(Path::new("custom.EXE"), "exe"));
+        assert!(!extension_is(Path::new("custom.exe.txt"), "exe"));
     }
 }

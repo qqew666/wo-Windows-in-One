@@ -48,4 +48,4 @@ jobs:
         run: |
           gh release create "$TAG" Two-Windows-in-One-win-x64.zip --verify-tag \
             --title "Two Windows in One $TAG" \
-            --notes $'Сборка для Windows x64.\n\nРазработчик: qqew666.\n\n[Сайт и ключ доступа](https://two-windows-in-one-key-api.sillypetunia8.chatgpt.site/).'
+            --notes $'Сборка для Windows x64.\n\nРазработчик: qqew666.\n\n[Сайт и ключ доступа](https://two-windows.sillypetunia8.chatgpt.site/).'

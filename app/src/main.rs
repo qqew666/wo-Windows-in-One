@@ -7,6 +7,8 @@ mod native;
 #[cfg(any(windows, test))]
 mod profile;
 #[cfg(windows)]
+mod sandbox;
+#[cfg(windows)]
 mod ui;
 
 #[cfg(windows)]

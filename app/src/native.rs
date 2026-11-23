@@ -1,10 +1,10 @@
-use crate::profile::Application;
+use crate::profile;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, SetLastError};
 use windows_sys::Win32::System::Threading::{
@@ -49,14 +49,14 @@ fn top_level_windows() -> Vec<HWND> {
     windows
 }
 
-pub fn running_apps() -> Vec<(PathBuf, Application)> {
+pub fn running_apps() -> Vec<PathBuf> {
     let mut pids = HashSet::new();
     let mut paths = HashSet::new();
     let mut apps = Vec::new();
 
     for window in top_level_windows() {
         let process = pid(window);
-        if process == 0 || !pids.insert(process) {
+        if process == 0 || process == std::process::id() || !pids.insert(process) {
             continue;
         }
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process) };
@@ -80,18 +80,13 @@ pub fn running_apps() -> Vec<(PathBuf, Application)> {
         }
 
         let path = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
-        if let Some(app) = Application::detect(&path)
+        if profile::extension_is(&path, "exe")
             && paths.insert(path.to_string_lossy().to_lowercase())
         {
-            apps.push((path, app));
+            apps.push(path);
         }
     }
-    apps.sort_by(|left, right| {
-        left.1
-            .name
-            .cmp(right.1.name)
-            .then_with(|| left.0.cmp(&right.0))
-    });
+    apps.sort_by_cached_key(|path| (profile::name(path).to_lowercase(), path.clone()));
     apps
 }
 
@@ -102,22 +97,34 @@ pub fn process_window(process: u32) -> Option<HWND> {
 }
 
 pub fn open_external(target: &OsStr) -> io::Result<()> {
+    shell_execute(target, "open")
+}
+
+pub fn launch_elevated(path: &Path) -> io::Result<()> {
+    shell_execute(path.as_os_str(), "runas")
+}
+
+fn shell_execute(target: &OsStr, operation: &str) -> io::Result<()> {
+    let path = Path::new(target);
+    let directory: Option<Vec<u16>> = path
+        .is_absolute()
+        .then(|| path.parent())
+        .flatten()
+        .map(|folder| folder.as_os_str().encode_wide().chain([0]).collect());
     let target: Vec<_> = target.encode_wide().chain([0]).collect();
-    let open: Vec<_> = "open".encode_utf16().chain([0]).collect();
+    let operation: Vec<_> = operation.encode_utf16().chain([0]).collect();
     let result = unsafe {
         ShellExecuteW(
             null_mut(),
-            open.as_ptr(),
+            operation.as_ptr(),
             target.as_ptr(),
             null(),
-            null(),
+            directory.as_ref().map_or(null(), |folder| folder.as_ptr()),
             SW_SHOWNORMAL,
         )
     };
     if result as isize <= 32 {
-        Err(io::Error::other(
-            "Windows не смогла открыть этот адрес или папку.",
-        ))
+        Err(io::Error::other("Windows не смогла выполнить команду."))
     } else {
         Ok(())
     }

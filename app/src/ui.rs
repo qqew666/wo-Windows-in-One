@@ -1,18 +1,20 @@
 use crate::license;
 use crate::native::{self, Bounds, DockedWindow};
-use crate::profile::{self, Application};
+use crate::{profile, sandbox};
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::OsStr;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::ptr::null_mut;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::{OffsetDateTime, UtcOffset};
 use windows_sys::Win32::Foundation::HWND;
 
-const SITE: &str = "https://two-windows-in-one-key-api.sillypetunia8.chatgpt.site/";
+const SITE: &str = "https://two-windows.sillypetunia8.chatgpt.site/";
 const BACKGROUND: Color32 = Color32::from_rgb(17, 23, 20);
 const SURFACE: Color32 = Color32::from_rgb(27, 38, 31);
 const FIELD: Color32 = Color32::from_rgb(36, 49, 40);
@@ -49,13 +51,19 @@ pub fn run() -> eframe::Result {
 struct Pending {
     child: Child,
     started: Instant,
+    embed: bool,
 }
 
 struct Launcher {
     host: HWND,
     data: Option<PathBuf>,
-    apps: Vec<(PathBuf, Application)>,
-    selection: Option<(PathBuf, Application)>,
+    apps: Vec<PathBuf>,
+    selection: Option<PathBuf>,
+    sandbox_input: Option<PathBuf>,
+    isolate: bool,
+    sandbox_options: sandbox::Options,
+    share_folder: bool,
+    sandbox_job: Option<Receiver<io::Result<PathBuf>>>,
     embed: bool,
     key_input: String,
     active_key: String,
@@ -104,18 +112,24 @@ impl Launcher {
             .unwrap_or_default();
         let expiry = license::verify(&active_key, unix_now()).ok();
         let apps = native::running_apps();
+        let sandbox_input = apps.first().and_then(|path| sandbox::local_path(path).ok());
 
         Self {
             host,
             data,
             selection: apps.first().cloned(),
             apps,
+            sandbox_input,
+            isolate: false,
+            sandbox_options: sandbox::Options::default(),
+            share_folder: false,
+            sandbox_job: None,
             embed: !host.is_null(),
             key_input: active_key.clone(),
             active_key,
             expiry,
             key_error: None,
-            status: "Выберите программу и откройте её с отдельным профилем.".into(),
+            status: "Выберите открытое приложение или файл на диске.".into(),
             status_error: false,
             pending: None,
             docked: None,
@@ -150,10 +164,10 @@ impl Launcher {
     }
 
     fn launch(&mut self) {
-        let Some((path, app)) = self.selection.clone() else {
+        let Some(path) = self.selection.clone() else {
             return;
         };
-        let Some(data) = &self.data else {
+        let Some(data) = self.data.clone() else {
             self.message("Папка LocalAppData недоступна.", true);
             return;
         };
@@ -162,43 +176,116 @@ impl Launcher {
             self.key_error = Some(error.message().into());
             return;
         }
-        match app.launch(&path, data) {
-            Ok(child) if self.embed && !self.host.is_null() => {
+        if self.isolate {
+            let Some(source) = self.sandbox_input.clone() else {
+                self.message(
+                    "Для запуска в песочнице выберите файл на локальном диске.",
+                    true,
+                );
+                return;
+            };
+            if !self.sandbox_options.single_file && !self.share_folder {
+                return;
+            }
+            if native::running_apps().iter().any(|candidate| {
+                candidate
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|stem| {
+                        matches!(
+                            stem.to_ascii_lowercase().as_str(),
+                            "windowssandbox"
+                                | "windowssandboxclient"
+                                | "windowssandboxremotesession"
+                        )
+                    })
+            }) {
+                self.message(
+                    "Закройте активную песочницу Windows перед запуском новой.",
+                    true,
+                );
+                return;
+            }
+            let (send, receive) = mpsc::channel();
+            let options = self.sandbox_options;
+            std::thread::spawn(move || {
+                sandbox::clean_old_sessions(&data);
+                let _ = send.send(sandbox::prepare(&source, &data, options));
+            });
+            self.sandbox_job = Some(receive);
+            self.message("Подготавливаю файл для Windows Sandbox…", false);
+            return;
+        }
+        match profile::launch(&path, &data) {
+            Ok(child) => {
                 self.pending = Some(Pending {
                     child,
                     started: Instant::now(),
+                    embed: self.embed && !self.host.is_null(),
                 });
-                self.message(
-                    format!("Открываю {name} с отдельным профилем…", name = app.name),
-                    false,
-                );
+                self.message(format!("Запускаю {}…", profile::name(&path)), false);
             }
-            Ok(_) => self.message(
-                format!(
-                    "Открываю {name} с отдельным профилем в своём окне.",
-                    name = app.name
-                ),
-                false,
+            Err(error) if error.raw_os_error() == Some(740) => {
+                match native::launch_elevated(&path) {
+                    Ok(()) => self.message(
+                        "Запуск передан Windows. Проверьте отдельное окно и запрос UAC.",
+                        false,
+                    ),
+                    Err(error) => {
+                        self.message(format!("Windows отклонила запуск ({error})."), true)
+                    }
+                }
+            }
+            Err(error) => self.message(
+                format!("Запуск не удался ({error}). Попробуйте отдельную среду."),
+                true,
             ),
-            Err(error) => self.message(format!("Запуск не удался: {error}"), true),
         }
     }
 
+    fn select_path(&mut self, path: PathBuf) {
+        if profile::extension_is(&path, "msi") {
+            self.isolate = true;
+            self.sandbox_options.single_file = true;
+        }
+        self.share_folder = false;
+        self.sandbox_input = sandbox::local_path(&path).ok();
+        self.selection = Some(path);
+        self.message("Программа выбрана.", false);
+    }
+
     fn browse(&mut self) {
-        let chosen = rfd::FileDialog::new()
-            .set_title("Выберите файл поддерживаемой программы")
-            .add_filter("Программы Windows", &["exe"])
-            .pick_file();
-        let Some(path) = chosen else { return };
-        match Application::detect(&path) {
-            Some(app) => {
-                self.selection = Some((path, app));
-                self.message("Программа выбрана.", false);
-            }
-            None => self.message(
-                "У этой программы пока нет поддерживаемого способа запуска отдельного профиля.",
-                true,
-            ),
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Выберите программу или установщик")
+            .add_filter("Программы и установщики", &["exe", "msi"])
+            .pick_file()
+        {
+            self.select_path(path);
+        }
+    }
+
+    fn poll_sandbox(&mut self) {
+        let Some(job) = &self.sandbox_job else { return };
+        let outcome = match job.try_recv() {
+            Ok(outcome) => outcome,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("Подготовка файла прервана.")),
+        };
+        self.sandbox_job = None;
+        match outcome {
+            Ok(config) => match native::open_external(config.as_os_str()) {
+                Ok(()) => self.message(
+                    "Запуск передан Windows Sandbox. Дождитесь окна отдельной среды.",
+                    false,
+                ),
+                Err(_) => {
+                    if let Some(session) = config.parent() {
+                        let _ = fs::remove_dir_all(session);
+                    }
+                    self.message("Windows Sandbox не открылась. Проверьте компонент Windows и аппаратную виртуализацию.", true);
+                }
+            },
+            Err(error) => self.message(format!("Песочница не подготовлена ({error})."), true),
         }
     }
 
@@ -218,9 +305,9 @@ impl Launcher {
             Ok(Some(status)) => {
                 self.pending = None;
                 let hint = if status.success() {
-                    "Программа передала запуск своему процессу. Проверьте отдельное окно."
+                    "Команда завершилась. Если открылось прежнее окно, попробуйте Windows Sandbox."
                 } else {
-                    "Второй процесс завершился. Если этот профиль уже открыт, используйте его окно."
+                    "Второй процесс завершился. Для приложения с ограничением запуска попробуйте Windows Sandbox."
                 };
                 self.message(hint, !status.success());
             }
@@ -234,8 +321,15 @@ impl Launcher {
             Ok(None) => {
                 let process = pending.child.id();
                 if let Some(window) = native::process_window(process) {
+                    let attachment = pending
+                        .embed
+                        .then(|| DockedWindow::attach(window, self.host, process));
                     self.pending = None;
-                    match DockedWindow::attach(window, self.host, process) {
+                    let Some(attachment) = attachment else {
+                        self.message("Новый процесс открыл отдельное окно.", false);
+                        return;
+                    };
+                    match attachment {
                         Ok(docked) => {
                             self.docked = Some(docked);
                             self.message("Второй экземпляр открыт в рабочей области.", false);
@@ -249,7 +343,7 @@ impl Launcher {
                     }
                 } else if pending.started.elapsed() >= Duration::from_secs(18) {
                     self.pending = None;
-                    self.message("Окно второго процесса пока не найдено. Если программа откроется, она появится отдельно.", false);
+                    self.message("Окно второго процесса не найдено. Проверьте окна программы или попробуйте Windows Sandbox.", false);
                 }
             }
         }
@@ -270,12 +364,13 @@ impl Launcher {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Приложение").size(22.0).strong());
-        ui.label(RichText::new("Поддерживаемые открытые программы").color(MUTED));
+        ui.label(RichText::new("Открытые программы").color(MUTED));
 
-        let selected = self
-            .selection
-            .as_ref()
-            .map_or("Выберите программу", |(_, app)| app.name);
+        let selected = self.selection.as_ref().map_or_else(
+            || "Выберите программу".to_owned(),
+            |path| profile::name(path),
+        );
+        let mut new_selection = None;
         egui::ComboBox::from_id_salt("running-apps")
             .width(ui.available_width())
             .selected_text(selected)
@@ -283,48 +378,101 @@ impl Launcher {
                 if self.apps.is_empty() {
                     ui.label("Открытые программы не найдены.");
                 }
-                for (path, app) in &self.apps {
-                    let active = self
-                        .selection
-                        .as_ref()
-                        .is_some_and(|(selected, _)| selected == path);
+                for path in &self.apps {
                     if ui
-                        .selectable_label(active, app.name)
+                        .selectable_label(
+                            self.selection.as_ref() == Some(path),
+                            profile::name(path),
+                        )
                         .on_hover_text(path.display().to_string())
                         .clicked()
                     {
-                        self.selection = Some((path.clone(), *app));
+                        new_selection = Some(path.clone());
                     }
                 }
             });
+        if let Some(path) = new_selection {
+            self.select_path(path);
+        }
 
         ui.horizontal(|ui| {
-            if ui.button("Выбрать .exe").clicked() {
+            if ui.button("Выбрать .exe / .msi").clicked() {
                 self.browse();
             }
-            if ui.button("Обновить список").clicked() {
+            if ui.button("Обновить").clicked() {
                 self.apps = native::running_apps();
-                if self.selection.is_none() {
-                    self.selection = self.apps.first().cloned();
+                if self.selection.is_none()
+                    && let Some(path) = self.apps.first().cloned()
+                {
+                    self.select_path(path);
                 }
             }
         });
 
-        ui.add_enabled_ui(!self.host.is_null(), |ui| {
-            ui.checkbox(&mut self.embed, "Встроить окно, если оно совместимо");
+        let msi = self
+            .selection
+            .as_ref()
+            .is_some_and(|path| profile::extension_is(path, "msi"));
+        ui.add_enabled_ui(!msi, |ui| {
+            ui.radio_value(&mut self.isolate, false, "Запуск на ПК");
         });
+        ui.radio_value(&mut self.isolate, true, "Windows Sandbox");
+        if self.isolate {
+            if ui
+                .checkbox(
+                    &mut self.sandbox_options.single_file,
+                    "Перенести только выбранный файл",
+                )
+                .changed()
+            {
+                self.share_folder = false;
+            }
+            if !self.sandbox_options.single_file {
+                let folder = self.sandbox_input.as_deref().and_then(Path::parent);
+                if let Some(folder) = folder {
+                    ui.colored_label(MUTED, folder.display().to_string());
+                    ui.checkbox(&mut self.share_folder, "Разрешить чтение этой папки");
+                }
+            }
+            ui.checkbox(&mut self.sandbox_options.network, "Интернет в песочнице");
+            ui.hyperlink_to("Как включить Windows Sandbox", sandbox::HELP);
+        } else {
+            ui.add_enabled_ui(!self.host.is_null(), |ui| {
+                ui.checkbox(&mut self.embed, "Встроить совместимое окно");
+            });
+            if let Some(path) = &self.selection {
+                if let Some(app) = profile::Application::detect(path) {
+                    ui.colored_label(
+                        MUTED,
+                        format!("{} запустится с отдельным профилем.", app.name),
+                    );
+                } else {
+                    ui.colored_label(
+                        MUTED,
+                        "Параметры второго запуска определяет сама программа.",
+                    );
+                }
+            }
+        }
 
+        let sandbox_ready = !self.isolate
+            || (self.sandbox_input.is_some()
+                && (self.sandbox_options.single_file || self.share_folder));
         let ready = self.selection.is_some()
             && self.expiry.is_some()
             && self.pending.is_none()
-            && self.docked.is_none();
-        let launch = egui::Button::new(
-            RichText::new("Открыть второй профиль")
-                .color(BACKGROUND)
-                .strong(),
-        )
-        .fill(ACCENT)
-        .min_size(Vec2::new(ui.available_width(), 42.0));
+            && self.docked.is_none()
+            && self.sandbox_job.is_none()
+            && sandbox_ready
+            && (self.isolate || !msi);
+        let label = if self.isolate {
+            "Запустить в песочнице"
+        } else {
+            "Открыть программу"
+        };
+        let launch = egui::Button::new(RichText::new(label).color(BACKGROUND).strong())
+            .fill(ACCENT)
+            .min_size(Vec2::new(ui.available_width(), 42.0));
         if ui.add_enabled(ready, launch).clicked() {
             self.launch();
         }
@@ -349,7 +497,7 @@ impl Launcher {
         } else if let Some(expires) = self.expiry {
             ui.colored_label(ACCENT, format!("Активен до {} мск.", moscow_date(expires)));
         } else {
-            ui.colored_label(MUTED, "Получите ключ для запуска второго профиля.");
+            ui.colored_label(MUTED, "Получите ключ для запуска программы.");
         }
     }
 }
@@ -367,6 +515,7 @@ impl eframe::App for Launcher {
             self.expiry = None;
             self.key_error = Some(license::KeyError::Expired.message().into());
         }
+        self.poll_sandbox();
         self.poll_window();
 
         egui::TopBottomPanel::top("header")
@@ -414,7 +563,9 @@ impl eframe::App for Launcher {
             .resizable(false)
             .exact_width(322.0)
             .frame(Frame::new().fill(SURFACE).inner_margin(Margin::same(20)))
-            .show(ctx, |ui| self.controls(ui));
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui));
+            });
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BACKGROUND).inner_margin(Margin::same(21)))
@@ -468,7 +619,7 @@ impl eframe::App for Launcher {
                     );
                 }
             });
-        ctx.request_repaint_after(if self.pending.is_some() {
+        ctx.request_repaint_after(if self.pending.is_some() || self.sandbox_job.is_some() {
             Duration::from_millis(150)
         } else {
             Duration::from_secs(1)

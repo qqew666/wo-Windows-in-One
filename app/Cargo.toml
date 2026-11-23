@@ -1,10 +1,10 @@
 [package]
 name = "two-windows-in-one"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2024"
 authors = ["qqew666"]
 repository = "https://github.com/qqew666/wo-Windows-in-One"
-homepage = "https://two-windows-in-one-key-api.sillypetunia8.chatgpt.site/"
+homepage = "https://two-windows.sillypetunia8.chatgpt.site/"
 description = "Separate application profiles and optional Windows window embedding"
 
 [[bin]]

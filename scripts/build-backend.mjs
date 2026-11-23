@@ -9,7 +9,10 @@ const mime = ["text/html; charset=utf-8", "text/css; charset=utf-8", "text/javas
 const assets = {};
 
 for (const [index, name] of files.entries()) {
-  const data = await readFile(new URL("site/" + name, root));
+  let data = await readFile(new URL("site/" + name, root));
+  if (name === "settings.js") {
+    data = Buffer.concat([data, Buffer.from("\nwindow.twiKeyApi = window.location.origin;\n")]);
+  }
   assets["/" + name] = { type: mime[index], data: data.toString("base64") };
 }
 assets["/"] = assets["/index.html"];
