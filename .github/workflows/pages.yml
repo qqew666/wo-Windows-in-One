@@ -1,0 +1,41 @@
+name: GitHub Pages and daily keys
+
+on:
+  push:
+    branches: [main]
+    paths: [site/**, scripts/make-keys.mjs, app/license-public.pem, .github/workflows/pages.yml]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 18 * * *'
+    - cron: '14 1 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v5
+      - name: Generate signed keys and set repository links
+        env:
+          TWI_SIGNING_PRIVATE_PEM: ${{ secrets.TWI_SIGNING_PRIVATE_PEM }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          node scripts/make-keys.mjs
+          node -e 'process.stdout.write("window.twiRepo = " + JSON.stringify(process.env.REPO_URL) + ";\n")' > site/settings.js
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deploy

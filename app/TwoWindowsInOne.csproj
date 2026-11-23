@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>TwoWindowsInOne</AssemblyName>
+    <Product>Two Windows in One</Product>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="logo.png" LogicalName="Twi.Logo" />
+    <EmbeddedResource Include="app.ico" LogicalName="Twi.Icon" />
+    <EmbeddedResource Include="license-public.pem" LogicalName="Twi.LicenseKey" Condition="Exists('license-public.pem')" />
+    <EmbeddedResource Include="site-url.txt" LogicalName="Twi.SiteUrl" Condition="Exists('site-url.txt')" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,53 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: [app/**, .github/workflows/windows.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Configure site and publish
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          CUSTOM_SITE_URL: ${{ vars.TWI_SITE_URL }}
+        run: |
+          test -s app/license-public.pem
+          printf '%s\n' "${CUSTOM_SITE_URL:-https://${REPO_OWNER,,}.github.io/${REPO_NAME}/}" > app/site-url.txt
+          dotnet publish app/TwoWindowsInOne.csproj -c Release -r win-x64 --self-contained true \
+            -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o dist/windows
+          cd dist/windows
+          zip ../Two-Windows-in-One-win-x64.zip TwoWindowsInOne.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Two-Windows-in-One-win-x64
+          path: dist/Two-Windows-in-One-win-x64.zip
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Two-Windows-in-One-win-x64
+      - name: Publish Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" Two-Windows-in-One-win-x64.zip --generate-notes --verify-tag

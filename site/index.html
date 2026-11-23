@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Откройте второй экземпляр приложения в Windows Sandbox. Скачайте Two Windows in One и получите сегодняшний ключ доступа.">
+  <meta name="theme-color" content="#111714">
+  <title>Two Windows in One — второе окно для Windows</title>
+  <link rel="icon" href="logo.png" type="image/png">
+  <link rel="stylesheet" href="style.css">
+  <script src="settings.js" defer></script>
+  <script src="site.js" defer></script>
+</head>
+<body>
+  <header class="shell header">
+    <a class="brand" href="./" aria-label="Two Windows in One, главная">
+      <img src="logo.png" alt="" width="37" height="37">
+      <span>Two Windows <em>in One</em></span>
+    </a>
+    <nav aria-label="Навигация">
+      <a href="#setup">Установка</a>
+      <a href="https://www.youtube.com/@Maklyxa69" target="_blank" rel="noopener noreferrer">YouTube</a>
+    </nav>
+    <a class="button outline release-link" href="https://github.com/qqew666/two-windows-in-one/releases/latest">Скачать</a>
+  </header>
+
+  <main class="shell">
+    <section class="hero" aria-labelledby="title">
+      <div class="hero-copy">
+        <p class="platform"><span class="windows-mark" aria-hidden="true"></span> Утилита для Windows</p>
+        <h1 id="title">Одно приложение.<br><em>Два экземпляра.</em></h1>
+        <p class="intro">Оставьте первое окно открытым, а второе запустите в Windows Sandbox с отдельными настройками и данными.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#access">Получить ключ</a>
+          <a class="button outline release-link" href="https://github.com/qqew666/two-windows-in-one/releases/latest">Скачать для Windows</a>
+        </div>
+      </div>
+
+      <figure class="visual" aria-label="Схема. Первое окно работает в Windows, второе открывается в отдельной песочнице.">
+        <div class="halo"></div>
+        <div class="window first">
+          <div class="chrome"><i></i><i></i><i></i><span>Основное окно</span></div>
+          <div class="window-content">
+            <span class="window-icon"><span class="windows-mark"></span></span>
+            <span class="line wide"></span><span class="line short"></span>
+          </div>
+        </div>
+        <div class="window second">
+          <div class="chrome"><i></i><i></i><i></i><span>Windows Sandbox</span></div>
+          <div class="window-content">
+            <img src="logo.png" alt="" width="50" height="50">
+            <span class="line wide"></span><span class="line short"></span>
+          </div>
+        </div>
+        <figcaption><span></span> Отдельная среда</figcaption>
+      </figure>
+    </section>
+
+    <section id="access" class="access" aria-labelledby="access-title">
+      <div>
+        <p class="section-label">Активация</p>
+        <h2 id="access-title">Ключ на сутки</h2>
+        <p>Каждый день в 00:00 по Москве появляется новый ключ. Скопируйте его и вставьте в приложение.</p>
+      </div>
+      <div class="key-tool">
+        <label for="key">Сегодняшний ключ</label>
+        <div class="key-row">
+          <input id="key" type="text" readonly placeholder="•••• •••• •••• ••••" spellcheck="false" autocomplete="off" aria-describedby="key-status">
+          <button class="button primary" id="key-action" type="button">Показать ключ</button>
+        </div>
+        <p class="key-status" id="key-status" role="status" aria-live="polite">Один ключ действует до ближайшей полуночи по Москве.</p>
+      </div>
+    </section>
+
+    <section id="setup" class="setup" aria-labelledby="setup-title">
+      <p class="section-label">Установка</p>
+      <h2 id="setup-title">Как открыть второе окно</h2>
+      <ol class="steps">
+        <li>
+          <h3>Включите песочницу</h3>
+          <p>В «Компонентах Windows» включите «Песочницу Windows» и перезагрузите ПК. Нужна Windows Pro, Enterprise или Education с аппаратной виртуализацией.</p>
+          <a href="https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-install" target="_blank" rel="noopener noreferrer">Инструкция Microsoft</a>
+        </li>
+        <li>
+          <h3>Активируйте приложение</h3>
+          <p>Скачайте сборку для Windows x64, распакуйте архив, запустите TwoWindowsInOne.exe и вставьте ключ с этой страницы.</p>
+        </li>
+        <li>
+          <h3>Выберите программу</h3>
+          <p>Выберите открытое приложение или его файл .exe. Если копии нужны установка или системные компоненты, выберите её установщик .exe или .msi.</p>
+        </li>
+      </ol>
+      <p class="note">В Windows Home песочница недоступна. Программы с драйверами, защитой от виртуальных машин или зависимостью от Microsoft Store могут не запуститься. При закрытии Sandbox её данные удаляются.</p>
+    </section>
+  </main>
+
+  <footer class="shell footer">
+    <span>Two Windows in One</span>
+    <div>
+      <a class="repo-link" href="https://github.com/qqew666/two-windows-in-one">GitHub</a>
+      <a href="https://www.youtube.com/@Maklyxa69" target="_blank" rel="noopener noreferrer">@Maklyxa69</a>
+    </div>
+  </footer>
+</body>
+</html>
