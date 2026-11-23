@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+dist/
+site/keys.json
+*.key
+*.private.pem
+node_modules/
+.dev.vars*
+.openai/
+app/target/

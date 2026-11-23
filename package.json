@@ -1,0 +1,11 @@
+{
+  "name": "two-windows-in-one-key-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-backend.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}
