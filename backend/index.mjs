@@ -113,7 +113,8 @@ export function makeWorker(assets = {}) {
       }
 
       const origin = request.headers.get("Origin");
-      if (origin && origin !== url.origin && origin !== env.TWI_SITE_ORIGIN) {
+      const allowedOrigins = (env.TWI_SITE_ORIGIN ?? "").split(",").map(value => value.trim());
+      if (origin && origin !== url.origin && !allowedOrigins.includes(origin)) {
         return new Response(null, { status: 403, headers: { Vary: "Origin" } });
       }
 

@@ -20,6 +20,16 @@ jobs:
         run: rustup update stable
       - name: Test Rust app on Windows
         run: cargo +stable test --locked --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
+      - name: Test download against the current public GitHub release
+        if: github.repository == 'qqew666/wo-Windows-in-One'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $metadata = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TWI_TEST_RELEASE_JSON = $metadata -join ""
+          cargo +stable test --locked --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc downloads_the_live_installer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Windows x64 release
         run: |
           cargo +stable build --locked --release --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
@@ -81,4 +91,4 @@ jobs:
         run: |
           gh release create "$TAG" Two-Windows-in-One-win-x64.zip Two-Windows-in-One-Setup.exe --verify-tag \
             --title "Two Windows in One $TAG" \
-            --notes $'Установщик и портативная сборка для Windows x64.\n\nРазработчик qqew666.\n\n[Сайт и ключ доступа](https://two-windows.sillypetunia8.chatgpt.site/).'
+            --notes $'Установщик и портативная сборка для Windows x64.\n\nРазработчик qqew666.\n\n[Сайт и ключ доступа](https://twi.sillypetunia8.chatgpt.site/).'

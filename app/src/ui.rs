@@ -1,6 +1,6 @@
 use crate::license;
 use crate::native::{self, Bounds, DockedWindow};
-use crate::{online, profile, sandbox};
+use crate::{account, online, profile, sandbox};
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::OsStr;
@@ -59,13 +59,31 @@ enum OnlineResult {
     Installer(Result<PathBuf, String>),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LaunchMode {
+    Profile,
+    Account,
+    Sandbox,
+}
+
+impl LaunchMode {
+    fn for_file(path: &Path) -> Self {
+        if profile::Application::detect(path).is_some() {
+            Self::Profile
+        } else {
+            Self::Sandbox
+        }
+    }
+}
+
 struct Launcher {
     host: HWND,
     data: Option<PathBuf>,
     apps: Vec<PathBuf>,
     selection: Option<PathBuf>,
     sandbox_input: Option<PathBuf>,
-    isolate: bool,
+    mode: LaunchMode,
+    account_name: String,
     sandbox_options: sandbox::Options,
     share_folder: bool,
     sandbox_job: Option<Receiver<io::Result<PathBuf>>>,
@@ -121,9 +139,9 @@ impl Launcher {
         let expiry = license::verify(&active_key, unix_now()).ok();
         let apps = native::running_apps();
         let sandbox_input = apps.first().and_then(|path| sandbox::local_path(path).ok());
-        let isolate = apps
+        let mode = apps
             .first()
-            .is_some_and(|path| profile::Application::detect(path).is_none());
+            .map_or(LaunchMode::Profile, |path| LaunchMode::for_file(path));
 
         Self {
             host,
@@ -131,7 +149,8 @@ impl Launcher {
             selection: apps.first().cloned(),
             apps,
             sandbox_input,
-            isolate,
+            mode,
+            account_name: String::new(),
             sandbox_options: sandbox::Options::default(),
             share_folder: false,
             sandbox_job: None,
@@ -288,7 +307,17 @@ impl Launcher {
             self.key_error = Some(error.message().into());
             return;
         }
-        if self.isolate {
+        if self.mode == LaunchMode::Account {
+            match account::launch(&path, self.account_name.trim()) {
+                Ok(()) => self.message(
+                    "Введите пароль второй учётной записи в окне Windows Runas. Программа откроется отдельно.",
+                    false,
+                ),
+                Err(error) => self.message(format!("Запуск под другой учётной записью не удался ({error})."), true),
+            }
+            return;
+        }
+        if self.mode == LaunchMode::Sandbox {
             let Some(source) = self.sandbox_input.clone() else {
                 self.message(
                     "Для запуска в песочнице выберите файл на локальном диске.",
@@ -338,14 +367,16 @@ impl Launcher {
                 self.message(format!("Запускаю {}…", profile::name(&path)), false);
             }
             Err(error) => self.message(
-                format!("Запуск не удался ({error}). Попробуйте отдельную среду."),
+                format!("Запуск не удался ({error}). Попробуйте другую учётную запись или Windows Sandbox."),
                 true,
             ),
         }
     }
 
     fn select_path(&mut self, path: PathBuf) {
-        self.isolate = profile::Application::detect(&path).is_none();
+        if self.mode != LaunchMode::Account || !profile::extension_is(&path, "exe") {
+            self.mode = LaunchMode::for_file(&path);
+        }
         self.sandbox_options.single_file = profile::extension_is(&path, "msi");
         self.share_folder = false;
         self.sandbox_input = sandbox::local_path(&path).ok();
@@ -512,50 +543,85 @@ impl Launcher {
             .selection
             .as_deref()
             .and_then(profile::Application::detect);
+        let executable = self
+            .selection
+            .as_deref()
+            .is_some_and(|path| profile::extension_is(path, "exe"));
         ui.add_enabled_ui(native_profile.is_some(), |ui| {
-            ui.radio_value(&mut self.isolate, false, "Отдельный профиль");
+            ui.radio_value(&mut self.mode, LaunchMode::Profile, "Отдельный профиль");
         });
-        ui.radio_value(&mut self.isolate, true, "Windows Sandbox");
-        if self.isolate {
-            if ui
-                .checkbox(
-                    &mut self.sandbox_options.single_file,
-                    "Перенести только выбранный файл",
-                )
-                .changed()
-            {
-                self.share_folder = false;
-            }
-            if !self.sandbox_options.single_file {
-                let folder = self.sandbox_input.as_deref().and_then(Path::parent);
-                if let Some(folder) = folder {
+        ui.add_enabled_ui(executable, |ui| {
+            ui.radio_value(
+                &mut self.mode,
+                LaunchMode::Account,
+                "Другой пользователь Windows",
+            );
+        });
+        ui.radio_value(&mut self.mode, LaunchMode::Sandbox, "Windows Sandbox");
+        match self.mode {
+            LaunchMode::Sandbox => {
+                if ui
+                    .checkbox(
+                        &mut self.sandbox_options.single_file,
+                        "Перенести только выбранный файл",
+                    )
+                    .changed()
+                {
+                    self.share_folder = false;
+                }
+                if !self.sandbox_options.single_file
+                    && let Some(folder) = self.sandbox_input.as_deref().and_then(Path::parent)
+                {
                     ui.colored_label(MUTED, folder.display().to_string());
                     ui.checkbox(&mut self.share_folder, "Разрешить чтение этой папки");
                 }
+                ui.checkbox(&mut self.sandbox_options.network, "Интернет в песочнице");
+                ui.hyperlink_to("Как включить Windows Sandbox", sandbox::HELP);
             }
-            ui.checkbox(&mut self.sandbox_options.network, "Интернет в песочнице");
-            ui.hyperlink_to("Как включить Windows Sandbox", sandbox::HELP);
-        } else {
-            ui.add_enabled_ui(!self.host.is_null(), |ui| {
-                ui.checkbox(&mut self.embed, "Встроить совместимое окно");
-            });
-            ui.colored_label(MUTED, "Каждый запуск использует новую папку профиля.");
+            LaunchMode::Account => {
+                ui.label("Имя второй локальной учётной записи");
+                ui.add_sized(
+                    [ui.available_width(), 34.0],
+                    egui::TextEdit::singleline(&mut self.account_name)
+                        .char_limit(48)
+                        .hint_text(r".\Имя"),
+                );
+                ui.colored_label(
+                    MUTED,
+                    "Windows запросит пароль учётной записи. PIN для этого режима не подходит.",
+                );
+                if ui.button("Учётные записи Windows").clicked()
+                    && let Err(error) = native::open_external(OsStr::new(account::SETTINGS))
+                {
+                    self.message(error.to_string(), true);
+                }
+            }
+            LaunchMode::Profile => {
+                ui.add_enabled_ui(!self.host.is_null(), |ui| {
+                    ui.checkbox(&mut self.embed, "Встроить совместимое окно");
+                });
+                ui.colored_label(MUTED, "Каждый запуск использует новую папку профиля.");
+            }
         }
 
-        let sandbox_ready = !self.isolate
-            || (self.sandbox_input.is_some()
-                && (self.sandbox_options.single_file || self.share_folder));
+        let mode_ready = match self.mode {
+            LaunchMode::Profile => native_profile.is_some(),
+            LaunchMode::Account => executable && !self.account_name.trim().is_empty(),
+            LaunchMode::Sandbox => {
+                self.sandbox_input.is_some()
+                    && (self.sandbox_options.single_file || self.share_folder)
+            }
+        };
         let ready = self.selection.is_some()
             && self.expiry.is_some()
             && self.pending.is_none()
             && self.docked.is_none()
             && self.sandbox_job.is_none()
-            && sandbox_ready
-            && (self.isolate || native_profile.is_some());
-        let label = if self.isolate {
-            "Запустить в песочнице"
-        } else {
-            "Открыть второй экземпляр"
+            && mode_ready;
+        let label = match self.mode {
+            LaunchMode::Profile => "Открыть второй экземпляр",
+            LaunchMode::Account => "Открыть от другого пользователя",
+            LaunchMode::Sandbox => "Запустить в песочнице",
         };
         let launch = egui::Button::new(RichText::new(label).color(BACKGROUND).strong())
             .fill(ACCENT)
@@ -649,6 +715,15 @@ impl eframe::App for Launcher {
                             .clicked()
                         {
                             self.update_action(ctx);
+                        }
+                        if ui.button("Релиз в браузере").clicked() {
+                            let url = self.update_release.as_ref().map_or_else(
+                                || online::RELEASES_PAGE.to_owned(),
+                                online::Release::installer_url,
+                            );
+                            if let Err(error) = native::open_external(OsStr::new(&url)) {
+                                self.message(error.to_string(), true);
+                            }
                         }
                         if ui.button("Получить ключ на сайте").clicked()
                             && let Err(error) = native::open_external(OsStr::new(online::SITE))

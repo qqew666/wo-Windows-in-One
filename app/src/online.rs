@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
-pub const SITE: &str = "https://two-windows.sillypetunia8.chatgpt.site/";
+pub const SITE: &str = "https://twi.sillypetunia8.chatgpt.site/";
+const ACTIVATION_API: &str = "https://two-windows.sillypetunia8.chatgpt.site/api/activate";
+pub const RELEASES_PAGE: &str = "https://github.com/qqew666/wo-Windows-in-One/releases/latest";
 const REPO: &str = "https://github.com/qqew666/wo-Windows-in-One";
 const RELEASE_API: &str = "https://api.github.com/repos/qqew666/wo-Windows-in-One/releases/latest";
+const ASSETS_API: &str = "https://api.github.com/repos/qqew666/wo-Windows-in-One/releases/assets";
 const SETUP: &str = "Two-Windows-in-One-Setup.exe";
 const MAX_INSTALLER: u64 = 32 * 1024 * 1024;
 
@@ -17,7 +20,7 @@ fn agent(seconds: u64) -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .https_only(true)
-            .max_redirects(4)
+            .max_redirects(6)
             .timeout_global(Some(Duration::from_secs(seconds)))
             .tls_config(
                 TlsConfig::builder()
@@ -44,7 +47,7 @@ pub fn short_code(value: &str) -> Option<String> {
 
 pub fn activate(code: &str) -> Result<String, String> {
     let mut response = agent(15)
-        .post(format!("{SITE}api/activate"))
+        .post(ACTIVATION_API)
         .send_json(json!({ "code": code }))
         .map_err(|error| match error {
             ureq::Error::StatusCode(422) => {
@@ -68,8 +71,15 @@ pub fn activate(code: &str) -> Result<String, String> {
 pub struct Release {
     pub version: Version,
     tag: String,
+    asset_id: Option<u64>,
     size: u64,
     digest: String,
+}
+
+impl Release {
+    pub fn installer_url(&self) -> String {
+        format!("{REPO}/releases/download/{}/{SETUP}", self.tag)
+    }
 }
 
 fn parse_release(metadata: &Value, installed: &Version) -> Result<Option<Release>, String> {
@@ -108,6 +118,7 @@ fn parse_release(metadata: &Value, installed: &Version) -> Result<Option<Release
     Ok(Some(Release {
         version,
         tag: tag.to_owned(),
+        asset_id: asset["id"].as_u64().filter(|id| *id > 0),
         size,
         digest: digest.to_ascii_lowercase(),
     }))
@@ -141,19 +152,44 @@ fn verify_installer(bytes: &[u8], release: &Release) -> Result<(), String> {
     Ok(())
 }
 
-pub fn download(release: &Release, data: &Path) -> Result<PathBuf, String> {
-    let url = format!("{REPO}/releases/download/{}/{SETUP}", release.tag);
-    let mut response = agent(90)
+fn fetch_installer(url: &str, release: &Release) -> Result<Vec<u8>, String> {
+    let mut response = agent(40)
         .get(url)
+        .header("Accept", "application/octet-stream")
+        .header("User-Agent", "TwoWindowsInOne-Updater")
+        .header("Cache-Control", "no-cache")
         .call()
-        .map_err(|error| format!("Не удалось скачать обновление ({error})."))?;
+        .map_err(|error| format!("запрос GitHub завершился ошибкой ({error})"))?;
     let bytes = response
         .body_mut()
         .with_config()
         .limit(release.size)
         .read_to_vec()
-        .map_err(|error| format!("Загрузка обновления прервана ({error})."))?;
+        .map_err(|error| format!("загрузка прервана ({error})"))?;
     verify_installer(&bytes, release)?;
+    Ok(bytes)
+}
+
+fn fetch_with_fallback(
+    release: &Release,
+    mut fetch: impl FnMut(&str, &Release) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    fetch(&release.installer_url(), release).or_else(|direct_error| {
+        let error = match release.asset_id {
+            Some(id) => match fetch(&format!("{ASSETS_API}/{id}"), release) {
+                Ok(bytes) => return Ok(bytes),
+                Err(api_error) => format!("{direct_error}. Запасной адрес ({api_error})"),
+            },
+            None => direct_error,
+        };
+        Err(format!(
+            "Обновление не скачалось. Откройте релиз в браузере. Подробности ({error})."
+        ))
+    })
+}
+
+pub fn download(release: &Release, data: &Path) -> Result<PathBuf, String> {
+    let bytes = fetch_with_fallback(release, fetch_installer)?;
 
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -205,6 +241,7 @@ mod tests {
             "tag_name": "v9.1.0",
             "assets": [{
                 "name": SETUP,
+                "id": 42,
                 "size": bytes.len(),
                 "digest": format!("sha256:{:x}", Sha256::digest(bytes)),
                 "browser_download_url": format!("{REPO}/releases/download/v9.1.0/{SETUP}")
@@ -214,6 +251,21 @@ mod tests {
         let release = parse_release(&metadata, &current).unwrap().unwrap();
         assert!(verify_installer(bytes, &release).is_ok());
         assert!(verify_installer(b"MZInstaller", &release).is_err());
+        let mut attempts = Vec::new();
+        let downloaded = fetch_with_fallback(&release, |url, _| {
+            attempts.push(url.to_owned());
+            if url.starts_with(ASSETS_API) {
+                Ok(bytes.to_vec())
+            } else {
+                Err("direct route unavailable".into())
+            }
+        })
+        .unwrap();
+        assert_eq!(downloaded, bytes);
+        assert_eq!(
+            attempts,
+            [release.installer_url(), format!("{ASSETS_API}/42")]
+        );
         assert!(
             parse_release(&metadata, &Version::new(9, 1, 0))
                 .unwrap()
@@ -222,6 +274,21 @@ mod tests {
         let mut bad = metadata;
         bad["assets"][0]["browser_download_url"] = json!("https://example.com/setup.exe");
         assert!(parse_release(&bad, &current).is_err());
+    }
+
+    #[test]
+    fn downloads_the_live_installer_when_metadata_is_provided() {
+        let Ok(json) = std::env::var("TWI_TEST_RELEASE_JSON") else {
+            return;
+        };
+        let metadata: Value = serde_json::from_str(&json).unwrap();
+        let release = parse_release(&metadata, &Version::new(0, 0, 0))
+            .unwrap()
+            .unwrap();
+        let folder = std::env::temp_dir().join(format!("twi-updater-test-{}", std::process::id()));
+        let path = download(&release, &folder).expect("download the existing GitHub release");
+        check_download(&path, &release).unwrap();
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
