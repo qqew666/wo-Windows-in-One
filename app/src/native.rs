@@ -1,20 +1,20 @@
 use crate::profile;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::io;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::{fs, io};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, HWND, LPARAM, SetLastError,
+    CloseHandle, GetLastError, HANDLE, HWND, LPARAM, LocalFree, SetLastError,
 };
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, GetWindowDpiAwarenessContext};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Shell::{CommandLineToArgvW, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetParent, GetWindow, GetWindowLongPtrW,
     GetWindowPlacement, GetWindowTextLengthW, GetWindowThreadProcessId, IsHungAppWindow, IsWindow,
@@ -35,21 +35,42 @@ fn top_level_windows() -> Vec<HWND> {
     unsafe extern "system" fn collect(window: HWND, ctx: LPARAM) -> i32 {
         // EnumWindows calls this synchronously with a valid Vec pointer.
         let windows = unsafe { &mut *(ctx as *mut Vec<HWND>) };
-        unsafe {
-            if IsWindowVisible(window) != 0
-                && GetWindow(window, GW_OWNER).is_null()
-                && GetWindowLongPtrW(window, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW == 0
-                && GetWindowTextLengthW(window) > 0
-            {
-                windows.push(window);
-            }
-        }
+        windows.push(window);
         1
     }
 
     let mut windows = Vec::new();
     unsafe { EnumWindows(Some(collect), (&mut windows as *mut Vec<HWND>) as LPARAM) };
     windows
+}
+
+fn is_application_window(window: HWND) -> bool {
+    unsafe {
+        IsWindowVisible(window) != 0
+            && GetWindow(window, GW_OWNER).is_null()
+            && GetWindowLongPtrW(window, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW == 0
+            && GetWindowTextLengthW(window) > 0
+    }
+}
+
+fn process_path(process: u32) -> Option<PathBuf> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut buffer = vec![0; 32_768];
+    let mut length = buffer.len() as u32;
+    let found = unsafe {
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            buffer.as_mut_ptr(),
+            &mut length,
+        );
+        CloseHandle(handle);
+        result != 0
+    };
+    found.then(|| PathBuf::from(OsString::from_wide(&buffer[..length as usize])))
 }
 
 pub fn running_apps() -> Vec<PathBuf> {
@@ -59,30 +80,16 @@ pub fn running_apps() -> Vec<PathBuf> {
 
     for window in top_level_windows() {
         let process = pid(window);
-        if process == 0 || process == std::process::id() || !pids.insert(process) {
+        if !is_application_window(window)
+            || process == 0
+            || process == std::process::id()
+            || !pids.insert(process)
+        {
             continue;
         }
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process) };
-        if handle.is_null() {
+        let Some(path) = process_path(process) else {
             continue;
-        }
-        let mut buffer = vec![0; 32_768];
-        let mut length = buffer.len() as u32;
-        let found = unsafe {
-            let result = QueryFullProcessImageNameW(
-                handle,
-                PROCESS_NAME_WIN32,
-                buffer.as_mut_ptr(),
-                &mut length,
-            );
-            CloseHandle(handle);
-            result != 0
         };
-        if !found {
-            continue;
-        }
-
-        let path = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
         if profile::extension_is(&path, "exe")
             && paths.insert(path.to_string_lossy().to_lowercase())
         {
@@ -93,10 +100,119 @@ pub fn running_apps() -> Vec<PathBuf> {
     apps
 }
 
-pub fn process_window(process: u32) -> Option<HWND> {
-    top_level_windows()
-        .into_iter()
-        .find(|&window| pid(window) == process && unsafe { IsHungAppWindow(window) == 0 })
+fn runs_executable(process: u32, executable: &Path) -> bool {
+    process_path(process)
+        .filter(|path| {
+            path.file_name()
+                .zip(executable.file_name())
+                .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+        .and_then(|path| fs::canonicalize(path).ok())
+        .is_some_and(|path| {
+            path.as_os_str()
+                .eq_ignore_ascii_case(executable.as_os_str())
+        })
+}
+
+pub struct LaunchWindows {
+    executable: PathBuf,
+    existing: HashSet<(HWND, u32)>,
+    original: Vec<(HWND, u32)>,
+}
+
+pub struct NewWindow {
+    pub handle: HWND,
+    pub child_process: Option<u32>,
+}
+
+impl LaunchWindows {
+    pub fn capture(executable: &Path) -> Self {
+        // Include hidden windows so a pre-existing window becoming visible cannot count as new.
+        let existing: HashSet<_> = top_level_windows()
+            .into_iter()
+            .map(|window| (window, pid(window)))
+            .collect();
+        let original = existing
+            .iter()
+            .copied()
+            .filter(|&(window, process)| {
+                is_application_window(window) && runs_executable(process, executable)
+            })
+            .collect();
+        Self {
+            executable: executable.to_path_buf(),
+            existing,
+            original,
+        }
+    }
+
+    pub fn original_closed(&self) -> bool {
+        self.original
+            .iter()
+            .any(|&(window, process)| pid(window) != process)
+    }
+
+    pub fn find(&self, child_process: Option<u32>) -> Option<NewWindow> {
+        let mut other_window = None;
+        for window in top_level_windows() {
+            let process = pid(window);
+            if process == 0
+                || self.existing.contains(&(window, process))
+                || !is_application_window(window)
+                || unsafe { IsHungAppWindow(window) != 0 }
+            {
+                continue;
+            }
+            if Some(process) == child_process {
+                return Some(NewWindow {
+                    handle: window,
+                    child_process,
+                });
+            }
+            if other_window.is_none() && runs_executable(process, &self.executable) {
+                other_window = Some(NewWindow {
+                    handle: window,
+                    child_process: None,
+                });
+            }
+        }
+        other_window
+    }
+}
+
+pub fn launch_arguments(text: &str) -> io::Result<Vec<OsString>> {
+    if text.contains('\0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Параметры содержат недопустимый символ.",
+        ));
+    }
+    // The first token is parsed as an executable name, so supply a placeholder.
+    let command: Vec<_> = "app.exe "
+        .encode_utf16()
+        .chain(text.encode_utf16())
+        .chain([0])
+        .collect();
+    let mut count = 0;
+    let args = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    if args.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut result = Vec::new();
+    unsafe {
+        for index in 1..count {
+            let value = *args.add(index as usize);
+            let mut length = 0;
+            while *value.add(length) != 0 {
+                length += 1;
+            }
+            result.push(OsString::from_wide(std::slice::from_raw_parts(
+                value, length,
+            )));
+        }
+        LocalFree(args.cast());
+    }
+    Ok(result)
 }
 
 pub fn open_external(target: &OsStr) -> io::Result<()> {
@@ -375,9 +491,23 @@ mod tests {
     }
 
     #[test]
-    fn attaches_and_restores_a_separate_windows_process() {
+    fn distinguishes_new_windows_and_only_embeds_the_new_process() {
+        let executable = profile::executable(&std::env::current_exe().unwrap()).unwrap();
+        let host = create_test_window("Two Windows in One test host");
+        assert!(!host.is_null());
+        let search = LaunchWindows::capture(&executable);
+        assert!(search.find(None).is_none());
+
+        let forwarded = create_test_window("Second window in the existing process");
+        assert!(!forwarded.is_null());
+        let matched = search.find(None).unwrap();
+        assert_eq!(matched.handle, forwarded);
+        assert!(matched.child_process.is_none());
+        assert!(!search.original_closed());
+        unsafe { DestroyWindow(forwarded) };
+
         let fixture = Fixture(
-            Command::new(std::env::current_exe().unwrap())
+            Command::new(&executable)
                 .args(["--exact", "native::tests::window_fixture", "--ignored"])
                 .env("TWI_WINDOW_FIXTURE", "1")
                 .stdout(Stdio::null())
@@ -386,8 +516,9 @@ mod tests {
         );
         let start = Instant::now();
         let window = loop {
-            if let Some(window) = process_window(fixture.0.id()) {
-                break window;
+            if let Some(window) = search.find(Some(fixture.0.id())) {
+                assert_eq!(window.child_process, Some(fixture.0.id()));
+                break window.handle;
             }
             assert!(
                 start.elapsed() < Duration::from_secs(10),
@@ -395,9 +526,6 @@ mod tests {
             );
             sleep(Duration::from_millis(50));
         };
-        let host = create_test_window("Two Windows in One test host");
-        assert!(!host.is_null());
-
         let style = unsafe { GetWindowLongPtrW(window, GWL_STYLE) };
         let mut docked = DockedWindow::attach(window, host, fixture.0.id()).unwrap();
         docked.fit(Bounds {
@@ -411,6 +539,19 @@ mod tests {
         assert!(unsafe { GetParent(window) }.is_null());
         assert_eq!(unsafe { GetWindowLongPtrW(window, GWL_STYLE) }, style);
         assert!(unsafe { IsWindow(window) } != 0);
+        assert!(!search.original_closed());
         unsafe { DestroyWindow(host) };
+        assert!(search.original_closed());
+    }
+
+    #[test]
+    fn direct_launch_passes_arguments_without_a_shell() {
+        let arguments = launch_arguments(r#"--flag "two words" "&" """#).unwrap();
+        assert_eq!(arguments, ["--flag", "two words", "&", ""]);
+        assert!(launch_arguments("").unwrap().is_empty());
+        let executable = profile::executable(&std::env::current_exe().unwrap()).unwrap();
+        let mut child =
+            profile::launch(&executable, Path::new("unused"), &["--list".into()]).unwrap();
+        assert!(child.wait().unwrap().success());
     }
 }

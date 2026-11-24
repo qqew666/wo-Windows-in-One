@@ -8,40 +8,65 @@ use std::process::{Child, Command, Stdio};
 use std::{fs, io, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Kind {
+enum Profile {
     Chromium,
     Firefox,
     Editor,
+    NotepadPlusPlus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Launch {
+    Profile(Profile),
+    Instance(&'static [&'static str]),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Application {
     pub name: &'static str,
-    pub kind: Kind,
+    launch: Launch,
 }
 
 impl Application {
     pub fn detect(path: &Path) -> Option<Self> {
         let file = path.file_name()?.to_str()?.to_ascii_lowercase();
-        let (name, kind) = match file.as_str() {
-            "chrome.exe" => ("Google Chrome", Kind::Chromium),
-            "msedge.exe" => ("Microsoft Edge", Kind::Chromium),
-            "brave.exe" => ("Brave", Kind::Chromium),
-            "chromium.exe" => ("Chromium", Kind::Chromium),
-            "vivaldi.exe" => ("Vivaldi", Kind::Chromium),
-            "firefox.exe" => ("Mozilla Firefox", Kind::Firefox),
-            "code.exe" => ("Visual Studio Code", Kind::Editor),
-            "code - insiders.exe" => ("VS Code Insiders", Kind::Editor),
-            "vscodium.exe" => ("VSCodium", Kind::Editor),
+        use Launch::{Instance, Profile as SeparateProfile};
+        let (name, launch) = match file.as_str() {
+            "chrome.exe" => ("Google Chrome", SeparateProfile(Profile::Chromium)),
+            "msedge.exe" => ("Microsoft Edge", SeparateProfile(Profile::Chromium)),
+            "brave.exe" => ("Brave", SeparateProfile(Profile::Chromium)),
+            "chromium.exe" => ("Chromium", SeparateProfile(Profile::Chromium)),
+            "vivaldi.exe" => ("Vivaldi", SeparateProfile(Profile::Chromium)),
+            "firefox.exe" => ("Mozilla Firefox", SeparateProfile(Profile::Firefox)),
+            "code.exe" => ("Visual Studio Code", SeparateProfile(Profile::Editor)),
+            "code - insiders.exe" => ("VS Code Insiders", SeparateProfile(Profile::Editor)),
+            "vscodium.exe" => ("VSCodium", SeparateProfile(Profile::Editor)),
+            "notepad++.exe" => ("Notepad++", SeparateProfile(Profile::NotepadPlusPlus)),
+            "winword.exe" => ("Microsoft Word", Instance(&["/w"])),
+            "excel.exe" => ("Microsoft Excel", Instance(&["/x"])),
+            "vlc.exe" => (
+                "VLC media player",
+                Instance(&[
+                    "--no-one-instance",
+                    "--no-one-instance-when-started-from-file",
+                ]),
+            ),
             _ => return None,
         };
-        Some(Self { name, kind })
+        Some(Self { name, launch })
     }
 
-    pub fn arguments(self, profile: &Path) -> Vec<OsString> {
+    #[cfg(windows)]
+    pub fn uses_profile(self) -> bool {
+        matches!(self.launch, Launch::Profile(_))
+    }
+}
+
+impl Profile {
+    fn arguments(self, profile: &Path) -> Vec<OsString> {
         let directory = profile.as_os_str();
-        match self.kind {
-            Kind::Chromium => {
+        match self {
+            Self::Chromium => {
                 let mut argument = OsString::from("--user-data-dir=");
                 argument.push(directory);
                 vec![
@@ -51,14 +76,19 @@ impl Application {
                     "about:blank".into(),
                 ]
             }
-            Kind::Firefox => vec!["-no-remote".into(), "-profile".into(), directory.into()],
-            Kind::Editor => vec![
+            Self::Firefox => vec!["-no-remote".into(), "-profile".into(), directory.into()],
+            Self::Editor => vec![
                 "--user-data-dir".into(),
                 directory.into(),
                 "--extensions-dir".into(),
                 profile.join("extensions").into_os_string(),
                 "--new-window".into(),
             ],
+            Self::NotepadPlusPlus => {
+                let mut settings = OsString::from("-settingsDir=");
+                settings.push(directory);
+                vec!["-multiInst".into(), "-nosession".into(), settings]
+            }
         }
     }
 }
@@ -103,28 +133,38 @@ fn new_profile(data: &Path, executable: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(windows)]
-pub fn launch(path: &Path, data: &Path) -> io::Result<Child> {
-    let canonical = fs::canonicalize(path)?;
-    let application = Application::detect(&canonical).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Для этой программы выберите Windows Sandbox.",
-        )
-    })?;
-    if !canonical.is_file() {
+pub fn executable(path: &Path) -> io::Result<PathBuf> {
+    let executable = fs::canonicalize(path)?;
+    if !extension_is(&executable, "exe") || !executable.is_file() {
         return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Выбранный файл недоступен.",
+            io::ErrorKind::InvalidInput,
+            "Выберите исполняемый файл .exe.",
         ));
     }
+    Ok(executable)
+}
 
-    let profile = new_profile(data, &canonical)?;
-    let mut command = Command::new(&canonical);
-    if let Some(directory) = canonical.parent() {
+#[cfg(windows)]
+pub fn launch(executable: &Path, data: &Path, arguments: &[OsString]) -> io::Result<Child> {
+    let mut command = Command::new(executable);
+    if let Some(directory) = executable.parent() {
         command.current_dir(directory);
     }
+    let mut profile_dir = None;
+    match Application::detect(executable).map(|app| app.launch) {
+        Some(Launch::Profile(profile)) => {
+            let directory = new_profile(data, executable)?;
+            command.args(profile.arguments(&directory));
+            profile_dir = Some(directory);
+        }
+        Some(Launch::Instance(instance)) => {
+            command.args(instance);
+        }
+        None => {
+            command.args(arguments);
+        }
+    }
     match command
-        .args(application.arguments(&profile))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -132,7 +172,9 @@ pub fn launch(path: &Path, data: &Path) -> io::Result<Child> {
     {
         Ok(child) => Ok(child),
         Err(error) => {
-            let _ = fs::remove_dir(&profile);
+            if let Some(directory) = profile_dir {
+                let _ = fs::remove_dir(directory);
+            }
             Err(error)
         }
     }
@@ -166,22 +208,47 @@ mod tests {
     #[test]
     fn second_profiles_use_product_specific_arguments() {
         let dir = Path::new("a profile path");
-        let chrome = Application::detect(Path::new("CHROME.EXE")).unwrap();
-        assert_eq!(chrome.arguments(dir)[0], "--user-data-dir=a profile path");
-
-        let firefox = Application::detect(Path::new("firefox.exe")).unwrap();
         assert_eq!(
-            firefox.arguments(dir),
+            Application::detect(Path::new("CHROME.EXE")).unwrap().launch,
+            Launch::Profile(Profile::Chromium)
+        );
+        assert_eq!(
+            Profile::Chromium.arguments(dir)[0],
+            "--user-data-dir=a profile path"
+        );
+
+        assert_eq!(
+            Profile::Firefox.arguments(dir),
             ["-no-remote", "-profile", "a profile path"]
         );
 
-        let code = Application::detect(Path::new("Code.exe")).unwrap();
-        let arguments = code.arguments(dir);
+        let arguments = Profile::Editor.arguments(dir);
         assert_eq!(
             &arguments[0..3],
             ["--user-data-dir", "a profile path", "--extensions-dir"]
         );
         assert_eq!(arguments[3], dir.join("extensions").as_os_str());
+        assert_eq!(
+            Profile::NotepadPlusPlus.arguments(dir),
+            ["-multiInst", "-nosession", "-settingsDir=a profile path"]
+        );
+        assert_eq!(
+            Application::detect(Path::new("WINWORD.EXE"))
+                .unwrap()
+                .launch,
+            Launch::Instance(&["/w"])
+        );
+        assert_eq!(
+            Application::detect(Path::new("EXCEL.EXE")).unwrap().launch,
+            Launch::Instance(&["/x"])
+        );
+        assert_eq!(
+            Application::detect(Path::new("vlc.exe")).unwrap().launch,
+            Launch::Instance(&[
+                "--no-one-instance",
+                "--no-one-instance-when-started-from-file"
+            ])
+        );
         assert!(Application::detect(Path::new("setup.exe")).is_none());
         assert!(extension_is(Path::new("custom.EXE"), "exe"));
         assert!(!extension_is(Path::new("custom.exe.txt"), "exe"));

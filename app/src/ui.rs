@@ -1,5 +1,5 @@
 use crate::license;
-use crate::native::{self, Bounds, DockedWindow};
+use crate::native::{self, Bounds, DockedWindow, LaunchWindows};
 use crate::{account, online, profile, sandbox};
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -49,6 +49,7 @@ pub fn run() -> eframe::Result {
 
 struct Pending {
     child: Child,
+    windows: LaunchWindows,
     started: Instant,
     embed: bool,
 }
@@ -61,17 +62,17 @@ enum OnlineResult {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum LaunchMode {
-    Profile,
+    Local,
     Account,
     Sandbox,
 }
 
 impl LaunchMode {
     fn for_file(path: &Path) -> Self {
-        if profile::Application::detect(path).is_some() {
-            Self::Profile
-        } else {
+        if profile::extension_is(path, "msi") {
             Self::Sandbox
+        } else {
+            Self::Local
         }
     }
 }
@@ -83,6 +84,7 @@ struct Launcher {
     selection: Option<PathBuf>,
     sandbox_input: Option<PathBuf>,
     mode: LaunchMode,
+    arguments: String,
     account_name: String,
     sandbox_options: sandbox::Options,
     share_folder: bool,
@@ -141,7 +143,7 @@ impl Launcher {
         let sandbox_input = apps.first().and_then(|path| sandbox::local_path(path).ok());
         let mode = apps
             .first()
-            .map_or(LaunchMode::Profile, |path| LaunchMode::for_file(path));
+            .map_or(LaunchMode::Local, |path| LaunchMode::for_file(path));
 
         Self {
             host,
@@ -150,6 +152,7 @@ impl Launcher {
             apps,
             sandbox_input,
             mode,
+            arguments: String::new(),
             account_name: String::new(),
             sandbox_options: sandbox::Options::default(),
             share_folder: false,
@@ -357,25 +360,49 @@ impl Launcher {
             self.message("Подготавливаю файл для Windows Sandbox…", false);
             return;
         }
-        match profile::launch(&path, &data) {
+        let executable = match profile::executable(&path) {
+            Ok(executable) => executable,
+            Err(error) => {
+                self.message(
+                    format!("Не удалось открыть файл программы ({error})."),
+                    true,
+                );
+                return;
+            }
+        };
+        let arguments = if profile::Application::detect(&executable).is_some() {
+            Vec::new()
+        } else {
+            match native::launch_arguments(&self.arguments) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    self.message(
+                        format!("Не удалось прочитать параметры запуска ({error})."),
+                        true,
+                    );
+                    return;
+                }
+            }
+        };
+        let windows = LaunchWindows::capture(&executable);
+        match profile::launch(&executable, &data, &arguments) {
             Ok(child) => {
                 self.pending = Some(Pending {
                     child,
+                    windows,
                     started: Instant::now(),
                     embed: self.embed && !self.host.is_null(),
                 });
                 self.message(format!("Запускаю {}…", profile::name(&path)), false);
             }
-            Err(error) => self.message(
-                format!("Запуск не удался ({error}). Попробуйте другую учётную запись или Windows Sandbox."),
-                true,
-            ),
+            Err(error) => self.message(format!("Запуск не удался ({error})."), true),
         }
     }
 
     fn select_path(&mut self, path: PathBuf) {
-        if self.mode != LaunchMode::Account || !profile::extension_is(&path, "exe") {
+        if self.selection.as_ref() != Some(&path) {
             self.mode = LaunchMode::for_file(&path);
+            self.arguments.clear();
         }
         self.sandbox_options.single_file = profile::extension_is(&path, "msi");
         self.share_folder = false;
@@ -431,50 +458,58 @@ impl Launcher {
         let Some(pending) = self.pending.as_mut() else {
             return;
         };
-        match pending.child.try_wait() {
-            Ok(Some(status)) => {
-                self.pending = None;
-                let hint = if status.success() {
-                    "Команда завершилась. Если открылось прежнее окно, попробуйте Windows Sandbox."
-                } else {
-                    "Второй процесс завершился. Для приложения с ограничением запуска попробуйте Windows Sandbox."
-                };
-                self.message(hint, !status.success());
-            }
+        let status = match pending.child.try_wait() {
+            Ok(status) => status,
             Err(error) => {
                 self.pending = None;
                 self.message(
                     format!("Не удалось проверить второй процесс: {error}"),
                     true,
                 );
+                return;
             }
-            Ok(None) => {
-                let process = pending.child.id();
-                if let Some(window) = native::process_window(process) {
-                    let attachment = pending
-                        .embed
-                        .then(|| DockedWindow::attach(window, self.host, process));
-                    self.pending = None;
-                    let Some(attachment) = attachment else {
-                        self.message("Новый процесс открыл отдельное окно.", false);
-                        return;
-                    };
-                    match attachment {
-                        Ok(docked) => {
-                            self.docked = Some(docked);
-                            self.message("Второй экземпляр открыт в рабочей области.", false);
-                        }
-                        Err(error) => self.message(
-                            format!(
-                                "Программа открылась отдельно. Встраивание недоступно: {error}"
-                            ),
-                            false,
-                        ),
-                    }
-                } else if pending.started.elapsed() >= Duration::from_secs(18) {
-                    self.pending = None;
-                    self.message("Окно второго процесса не найдено. Проверьте окна программы или попробуйте Windows Sandbox.", false);
+        };
+        let process = status.is_none().then(|| pending.child.id());
+        if let Some(window) = pending.windows.find(process) {
+            let original_closed = pending.windows.original_closed();
+            let attachment = window
+                .child_process
+                .filter(|_| pending.embed && !original_closed)
+                .map(|process| DockedWindow::attach(window.handle, self.host, process));
+            self.pending = None;
+            if original_closed {
+                self.message(
+                    "Открылось новое окно. Одно из прежних окон закрылось во время запуска.",
+                    true,
+                );
+                return;
+            }
+            match attachment {
+                Some(Ok(docked)) => {
+                    self.docked = Some(docked);
+                    self.message("Второе окно открыто в рабочей области.", false);
                 }
+                Some(Err(error)) => self.message(
+                    format!("Второе окно открыто отдельно. Встраивание недоступно ({error})."),
+                    false,
+                ),
+                None => self.message("Второе окно открыто отдельно.", false),
+            }
+        } else if pending.started.elapsed() >= Duration::from_secs(18) {
+            let original_closed = pending.windows.original_closed();
+            self.pending = None;
+            if original_closed {
+                self.message(
+                    "Одно из прежних окон закрылось. Второе окно не найдено.",
+                    true,
+                );
+            } else if let Some(status) = status.filter(|status| !status.success()) {
+                self.message(
+                    format!("Процесс завершился ({status}). Второе окно не найдено."),
+                    true,
+                );
+            } else {
+                self.message("Второе окно не обнаружено. Программа могла открыть вкладку или активировать прежнее окно.", true);
             }
         }
     }
@@ -539,7 +574,7 @@ impl Launcher {
             }
         });
 
-        let native_profile = self
+        let known_app = self
             .selection
             .as_deref()
             .and_then(profile::Application::detect);
@@ -547,17 +582,23 @@ impl Launcher {
             .selection
             .as_deref()
             .is_some_and(|path| profile::extension_is(path, "exe"));
-        ui.add_enabled_ui(native_profile.is_some(), |ui| {
-            ui.radio_value(&mut self.mode, LaunchMode::Profile, "Отдельный профиль");
-        });
         ui.add_enabled_ui(executable, |ui| {
-            ui.radio_value(
-                &mut self.mode,
-                LaunchMode::Account,
-                "Другой пользователь Windows",
-            );
+            ui.radio_value(&mut self.mode, LaunchMode::Local, "Текущий пользователь");
         });
-        ui.radio_value(&mut self.mode, LaunchMode::Sandbox, "Windows Sandbox");
+        if executable || self.mode != LaunchMode::Local {
+            egui::CollapsingHeader::new("Другие способы запуска")
+                .default_open(self.mode != LaunchMode::Local)
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(executable, |ui| {
+                        ui.radio_value(
+                            &mut self.mode,
+                            LaunchMode::Account,
+                            "Другой пользователь Windows",
+                        );
+                    });
+                    ui.radio_value(&mut self.mode, LaunchMode::Sandbox, "Windows Sandbox");
+                });
+        }
         match self.mode {
             LaunchMode::Sandbox => {
                 if ui
@@ -596,16 +637,32 @@ impl Launcher {
                     self.message(error.to_string(), true);
                 }
             }
-            LaunchMode::Profile => {
+            LaunchMode::Local => {
                 ui.add_enabled_ui(!self.host.is_null(), |ui| {
                     ui.checkbox(&mut self.embed, "Встроить совместимое окно");
                 });
-                ui.colored_label(MUTED, "Каждый запуск использует новую папку профиля.");
+                if known_app.is_some_and(profile::Application::uses_profile) {
+                    ui.colored_label(MUTED, "Каждый запуск использует новую папку профиля.");
+                } else if known_app.is_some() {
+                    ui.colored_label(
+                        MUTED,
+                        "Будет использован режим отдельного экземпляра программы.",
+                    );
+                } else if executable {
+                    ui.colored_label(MUTED, "Программа сама решает, открыть ли ещё одно окно.");
+                    egui::CollapsingHeader::new("Параметры запуска").show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.arguments)
+                                .char_limit(2048)
+                                .hint_text("Аргументы программы"),
+                        );
+                    });
+                }
             }
         }
 
         let mode_ready = match self.mode {
-            LaunchMode::Profile => native_profile.is_some(),
+            LaunchMode::Local => executable,
             LaunchMode::Account => executable && !self.account_name.trim().is_empty(),
             LaunchMode::Sandbox => {
                 self.sandbox_input.is_some()
@@ -619,7 +676,7 @@ impl Launcher {
             && self.sandbox_job.is_none()
             && mode_ready;
         let label = match self.mode {
-            LaunchMode::Profile => "Открыть второй экземпляр",
+            LaunchMode::Local => "Открыть второе окно",
             LaunchMode::Account => "Открыть от другого пользователя",
             LaunchMode::Sandbox => "Запустить в песочнице",
         };
@@ -791,7 +848,7 @@ impl eframe::App for Launcher {
                     });
                 } else {
                     let text = if self.pending.is_some() {
-                        "Ожидаю окно второго процесса…"
+                        "Ожидаю новое окно…"
                     } else {
                         "Здесь откроется совместимое окно"
                     };
