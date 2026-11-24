@@ -41,7 +41,7 @@ cargo test --locked --manifest-path app/Cargo.toml --target x86_64-pc-windows-ms
 cargo build --locked --release --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
 ```
 
-Исполняемый файл появится в `app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe`. Установщик собирается Inno Setup из `app/installer/TwoWindowsInOne.iss` с параметром `/DAppVersion=2.3.0`. GitHub Actions тестирует установку, повторную установку и удаление и публикует установщик и ZIP после отправки тега.
+Исполняемый файл появится в `app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe`. Установщик собирается Inno Setup из `app/installer/TwoWindowsInOne.iss` с параметром `/DAppVersion=2.3.1`. GitHub Actions тестирует установку, повторную установку и удаление и публикует установщик и ZIP после отправки тега.
 
 ## Сайт
 
