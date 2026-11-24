@@ -25,10 +25,43 @@ jobs:
           cargo +stable build --locked --release --manifest-path app/Cargo.toml --target x86_64-pc-windows-msvc
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Compress-Archive -Path app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe -DestinationPath dist/Two-Windows-in-One-win-x64.zip
+      - name: Build installer
+        run: |
+          $roots = @("${env:ProgramFiles(x86)}", "$env:ProgramFiles")
+          $paths = foreach ($root in $roots) {
+            foreach ($major in "6", "7") { Join-Path $root "Inno Setup $major/ISCC.exe" }
+          }
+          $compiler = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$compiler) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $compiler = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (!$compiler) { throw "Inno Setup compiler not found" }
+          $version = (Select-String -Path app/Cargo.toml -Pattern '^version = "([0-9]+\.[0-9]+\.[0-9]+)"$').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") { throw "Tag does not match Cargo.toml" }
+          & $compiler "/DAppVersion=$version" "app/installer/TwoWindowsInOne.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test installation and reinstall
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "twi-installer-test"
+          $setup = (Resolve-Path "dist/Two-Windows-in-One-Setup.exe").Path
+          $source = "app/target/x86_64-pc-windows-msvc/release/TwoWindowsInOne.exe"
+          $installed = Join-Path $path "TwoWindowsInOne.exe"
+          $expected = (Get-FileHash $source).Hash
+          foreach ($attempt in 1..2) {
+            $process = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$path`"" -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Installer failed with $($process.ExitCode)" }
+            if ((Get-FileHash $installed).Hash -ne $expected) { throw "Installed executable differs from the build" }
+          }
+          $remove = Start-Process (Join-Path $path "unins000.exe") -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          if ($remove.ExitCode -ne 0 -or (Test-Path $installed)) { throw "Uninstaller smoke test failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: Two-Windows-in-One-win-x64
-          path: dist/Two-Windows-in-One-win-x64.zip
+          path: |
+            dist/Two-Windows-in-One-win-x64.zip
+            dist/Two-Windows-in-One-Setup.exe
           if-no-files-found: error
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -46,6 +79,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" Two-Windows-in-One-win-x64.zip --verify-tag \
+          gh release create "$TAG" Two-Windows-in-One-win-x64.zip Two-Windows-in-One-Setup.exe --verify-tag \
             --title "Two Windows in One $TAG" \
-            --notes $'Сборка для Windows x64.\n\nРазработчик: qqew666.\n\n[Сайт и ключ доступа](https://two-windows.sillypetunia8.chatgpt.site/).'
+            --notes $'Установщик и портативная сборка для Windows x64.\n\nРазработчик qqew666.\n\n[Сайт и ключ доступа](https://two-windows.sillypetunia8.chatgpt.site/).'

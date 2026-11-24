@@ -1,13 +1,11 @@
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::Path;
 #[cfg(windows)]
-use std::{
-    fs, io,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-};
+use std::process::{Child, Command, Stdio};
+#[cfg(any(windows, test))]
+use std::{fs, io, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
@@ -82,32 +80,62 @@ pub fn name(path: &Path) -> String {
         })
 }
 
+#[cfg(any(windows, test))]
+fn new_profile(data: &Path, executable: &Path) -> io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let family = Sha256::digest(executable.to_string_lossy().to_lowercase().as_bytes());
+    let root = data.join("Profiles").join(format!("{family:x}"));
+    fs::create_dir_all(&root)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let profile = root.join(format!(
+        "instance-{}-{stamp}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir(&profile)?;
+    Ok(profile)
+}
+
 #[cfg(windows)]
 pub fn launch(path: &Path, data: &Path) -> io::Result<Child> {
     let canonical = fs::canonicalize(path)?;
-    if !canonical.is_file() || !extension_is(&canonical, "exe") {
-        return Err(io::Error::new(
+    let application = Application::detect(&canonical).ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Выберите исполняемый файл .exe.",
+            "Для этой программы выберите Windows Sandbox.",
+        )
+    })?;
+    if !canonical.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Выбранный файл недоступен.",
         ));
     }
 
+    let profile = new_profile(data, &canonical)?;
     let mut command = Command::new(&canonical);
     if let Some(directory) = canonical.parent() {
         command.current_dir(directory);
     }
-    if let Some(application) = Application::detect(&canonical) {
-        // Maintain the same directory for profiles created by earlier releases.
-        let identifier = Sha256::digest(canonical.to_string_lossy().to_lowercase().as_bytes());
-        let profile = data.join("Profiles").join(format!("{identifier:x}"));
-        fs::create_dir_all(&profile)?;
-        command
-            .args(application.arguments(&profile))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+    match command
+        .args(application.arguments(&profile))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => Ok(child),
+        Err(error) => {
+            let _ = fs::remove_dir(&profile);
+            Err(error)
+        }
     }
-    command.spawn()
 }
 
 #[cfg(windows)]
@@ -121,6 +149,19 @@ pub fn data_dir() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_launches_never_reuse_a_live_profile() {
+        let data = std::env::temp_dir().join(format!("twi-unique-profiles-{}", std::process::id()));
+        let exe = Path::new("chrome.exe");
+        let first = new_profile(&data, exe).unwrap();
+        fs::write(first.join("first-window-data"), "keep").unwrap();
+        let second = new_profile(&data, exe).unwrap();
+        assert_ne!(first, second);
+        assert!(first.join("first-window-data").is_file());
+        assert!(!second.join("first-window-data").exists());
+        fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn second_profiles_use_product_specific_arguments() {

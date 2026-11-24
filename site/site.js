@@ -9,6 +9,8 @@ const submitButton = document.getElementById("submit-answer");
 const result = document.getElementById("key-result");
 const field = document.getElementById("key");
 const copyButton = document.getElementById("copy-key");
+const legacyField = document.getElementById("legacy-key");
+const copyLegacy = document.getElementById("copy-legacy");
 const status = document.getElementById("key-status");
 const expiryLabel = "Ключ действует до ближайшей полуночи по Москве.";
 const formatDate = new Intl.DateTimeFormat("ru-RU", {
@@ -17,6 +19,9 @@ const formatDate = new Intl.DateTimeFormat("ru-RU", {
 let ticket = null;
 let expires = null;
 
+for (const link of document.querySelectorAll(".installer-link")) {
+  link.href = window.twiRepo + "/releases/latest/download/Two-Windows-in-One-Setup.exe";
+}
 for (const link of document.querySelectorAll(".release-link")) link.href = window.twiRepo + "/releases/latest";
 for (const link of document.querySelectorAll(".repo-link")) link.href = window.twiRepo;
 
@@ -36,7 +41,7 @@ function busy(active) {
 
 function hideResult() {
   expires = null;
-  field.value = "";
+  field.value = legacyField.value = "";
   result.hidden = true;
   openButton.hidden = false;
   status.textContent = expiryLabel;
@@ -94,14 +99,15 @@ form.addEventListener("submit", async event => {
     }
 
     if (!response.ok) throw new Error("Key unavailable");
-    const { value, ends } = await response.json();
-    if (!/^TWI1\.\d+\.\d+\.[\w-]{342}$/.test(value) || !Number.isSafeInteger(ends) || ends * 1000 <= Date.now()) {
+    const { value, code: shortKey, ends } = await response.json();
+    if (!/^[2-9A-HJ-NP-Z]{5}-[2-9A-HJ-NP-Z]{5}$/.test(shortKey) || !/^TWI1\.\d+\.\d+\.[\w-]{342}$/.test(value) || !Number.isSafeInteger(ends) || ends * 1000 <= Date.now()) {
       throw new Error("Invalid key");
     }
 
     ticket = null;
     expires = ends * 1000;
-    field.value = value;
+    field.value = shortKey;
+    legacyField.value = value;
     form.hidden = true;
     result.hidden = false;
     status.textContent = "Действует до " + formatDate.format(expires) + " мск.";
@@ -114,18 +120,21 @@ form.addEventListener("submit", async event => {
   }
 });
 
-copyButton.addEventListener("click", async () => {
+async function copy(input) {
   if (!expires || Date.now() >= expires) {
     hideResult();
     return;
   }
 
   try {
-    await navigator.clipboard.writeText(field.value);
+    await navigator.clipboard.writeText(input.value);
     status.textContent = "Ключ скопирован. Вставьте его в приложение.";
   } catch {
-    field.focus();
-    field.select();
+    input.focus();
+    input.select();
     status.textContent = "Ключ выделен. Нажмите Ctrl+C, чтобы скопировать.";
   }
-});
+}
+
+copyButton.addEventListener("click", () => copy(field));
+copyLegacy.addEventListener("click", () => copy(legacyField));

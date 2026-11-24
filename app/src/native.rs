@@ -6,9 +6,12 @@ use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, SetLastError};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, HWND, LPARAM, SetLastError,
+};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    CreateMutexW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, GetWindowDpiAwarenessContext};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -100,10 +103,6 @@ pub fn open_external(target: &OsStr) -> io::Result<()> {
     shell_execute(target, "open")
 }
 
-pub fn launch_elevated(path: &Path) -> io::Result<()> {
-    shell_execute(path.as_os_str(), "runas")
-}
-
 fn shell_execute(target: &OsStr, operation: &str) -> io::Result<()> {
     let path = Path::new(target);
     let directory: Option<Vec<u16>> = path
@@ -128,6 +127,27 @@ fn shell_execute(target: &OsStr, operation: &str) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+// Setup checks this mutex before replacing the executable. Each launcher keeps a handle.
+pub struct InstallerLock(HANDLE);
+
+impl Drop for InstallerLock {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+pub fn installer_lock() -> Option<InstallerLock> {
+    let name: Vec<_> = "Local\\TwoWindowsInOne-3C394A86"
+        .encode_utf16()
+        .chain([0])
+        .collect();
+    let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return None;
+    }
+    Some(InstallerLock(handle))
 }
 
 fn set_long(window: HWND, index: i32, value: isize) -> io::Result<()> {

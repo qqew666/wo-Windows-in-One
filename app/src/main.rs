@@ -4,6 +4,8 @@
 mod license;
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+mod online;
 #[cfg(any(windows, test))]
 mod profile;
 #[cfg(windows)]
@@ -13,6 +15,7 @@ mod ui;
 
 #[cfg(windows)]
 fn main() -> eframe::Result {
+    let _installer_lock = native::installer_lock();
     ui::run()
 }
 

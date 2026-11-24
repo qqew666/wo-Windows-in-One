@@ -1,20 +1,19 @@
 use crate::license;
 use crate::native::{self, Bounds, DockedWindow};
-use crate::{profile, sandbox};
+use crate::{online, profile, sandbox};
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command};
 use std::ptr::null_mut;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::{OffsetDateTime, UtcOffset};
 use windows_sys::Win32::Foundation::HWND;
 
-const SITE: &str = "https://two-windows.sillypetunia8.chatgpt.site/";
 const BACKGROUND: Color32 = Color32::from_rgb(17, 23, 20);
 const SURFACE: Color32 = Color32::from_rgb(27, 38, 31);
 const FIELD: Color32 = Color32::from_rgb(36, 49, 40);
@@ -54,6 +53,12 @@ struct Pending {
     embed: bool,
 }
 
+enum OnlineResult {
+    Activation(Result<String, String>),
+    UpdateCheck(Result<Option<online::Release>, String>),
+    Installer(Result<PathBuf, String>),
+}
+
 struct Launcher {
     host: HWND,
     data: Option<PathBuf>,
@@ -69,6 +74,9 @@ struct Launcher {
     active_key: String,
     expiry: Option<i64>,
     key_error: Option<String>,
+    online_job: Option<Receiver<OnlineResult>>,
+    update_release: Option<online::Release>,
+    update_installer: Option<PathBuf>,
     status: String,
     status_error: bool,
     pending: Option<Pending>,
@@ -113,6 +121,9 @@ impl Launcher {
         let expiry = license::verify(&active_key, unix_now()).ok();
         let apps = native::running_apps();
         let sandbox_input = apps.first().and_then(|path| sandbox::local_path(path).ok());
+        let isolate = apps
+            .first()
+            .is_some_and(|path| profile::Application::detect(path).is_none());
 
         Self {
             host,
@@ -120,15 +131,18 @@ impl Launcher {
             selection: apps.first().cloned(),
             apps,
             sandbox_input,
-            isolate: false,
+            isolate,
             sandbox_options: sandbox::Options::default(),
             share_folder: false,
             sandbox_job: None,
-            embed: !host.is_null(),
-            key_input: active_key.clone(),
+            embed: false,
+            key_input: String::new(),
             active_key,
             expiry,
             key_error: None,
+            online_job: None,
+            update_release: None,
+            update_installer: None,
             status: "Выберите открытое приложение или файл на диске.".into(),
             status_error: false,
             pending: None,
@@ -141,25 +155,123 @@ impl Launcher {
         self.status_error = error;
     }
 
+    fn start_online(&mut self, task: impl FnOnce() -> OnlineResult + Send + 'static) {
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(task());
+        });
+        self.online_job = Some(receive);
+    }
+
     fn activate(&mut self) {
-        let candidate = self.key_input.trim();
-        match license::verify(candidate, unix_now()) {
+        if self.online_job.is_some() {
+            return;
+        }
+        let candidate = self.key_input.trim().to_owned();
+        if candidate.starts_with("TWI1.") {
+            self.accept_grant(candidate);
+        } else if let Some(code) = online::short_code(&candidate) {
+            self.key_error = None;
+            self.message("Проверяю ключ на сайте…", false);
+            self.start_online(move || OnlineResult::Activation(online::activate(&code)));
+        } else {
+            self.key_error = Some("Введите ключ из 10 символов с сайта.".into());
+        }
+    }
+
+    fn accept_grant(&mut self, candidate: String) {
+        match license::verify(&candidate, unix_now()) {
             Ok(expires) => {
-                self.active_key = candidate.to_owned();
                 self.expiry = Some(expires);
                 self.key_error = None;
                 if let Some(dir) = &self.data
-                    && let Err(error) = save_key(dir, candidate)
+                    && let Err(error) = save_key(dir, &candidate)
                 {
-                    self.message(
-                        format!(
-                            "Ключ активирован на текущий сеанс. Сохранить его не удалось: {error}"
-                        ),
-                        false,
-                    );
+                    self.message(format!("Ключ действует до закрытия приложения. Сохранить его не удалось ({error})."), false);
+                } else {
+                    self.message("Ключ активирован.", false);
                 }
+                self.active_key = candidate;
             }
             Err(error) => self.key_error = Some(error.message().into()),
+        }
+    }
+
+    fn poll_online(&mut self) {
+        let Some(job) = &self.online_job else { return };
+        let result = match job.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.online_job = None;
+                self.message("Запрос прерван. Повторите его.", true);
+                return;
+            }
+        };
+        self.online_job = None;
+        match result {
+            OnlineResult::Activation(Ok(grant)) => self.accept_grant(grant),
+            OnlineResult::Activation(Err(error)) => {
+                self.message("Активация не завершена.", true);
+                self.key_error = Some(error);
+            }
+            OnlineResult::UpdateCheck(Ok(release)) => {
+                let message = release.as_ref().map_or_else(
+                    || {
+                        format!(
+                            "Установлена актуальная версия {}.",
+                            env!("CARGO_PKG_VERSION")
+                        )
+                    },
+                    |release| format!("Доступно обновление {}.", release.version),
+                );
+                self.update_release = release;
+                self.message(message, false);
+            }
+            OnlineResult::Installer(Ok(path)) => {
+                self.update_installer = Some(path);
+                self.message(
+                    "Установщик проверен. Нажмите «Установить обновление».",
+                    false,
+                );
+            }
+            OnlineResult::UpdateCheck(Err(error)) | OnlineResult::Installer(Err(error)) => {
+                self.message(error, true)
+            }
+        }
+    }
+
+    fn update_action(&mut self, ctx: &egui::Context) {
+        if self.online_job.is_some() {
+            return;
+        }
+        if let Some(release) = self.update_release.clone() {
+            if let Some(path) = self.update_installer.clone() {
+                if let Err(error) = online::check_download(&path, &release) {
+                    self.update_installer = None;
+                    self.message(error, true);
+                    return;
+                }
+                if !self.detach() {
+                    return;
+                }
+                match Command::new(path).arg("/NORESTART").spawn() {
+                    Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    Err(error) => {
+                        self.message(format!("Не удалось открыть установщик ({error})."), true)
+                    }
+                }
+            } else if let Some(data) = self.data.clone() {
+                self.message("Скачиваю установщик с GitHub…", false);
+                self.start_online(move || {
+                    OnlineResult::Installer(online::download(&release, &data))
+                });
+            } else {
+                self.message("Папка LocalAppData недоступна.", true);
+            }
+        } else {
+            self.message("Проверяю обновления на GitHub…", false);
+            self.start_online(|| OnlineResult::UpdateCheck(online::check_update()));
         }
     }
 
@@ -225,17 +337,6 @@ impl Launcher {
                 });
                 self.message(format!("Запускаю {}…", profile::name(&path)), false);
             }
-            Err(error) if error.raw_os_error() == Some(740) => {
-                match native::launch_elevated(&path) {
-                    Ok(()) => self.message(
-                        "Запуск передан Windows. Проверьте отдельное окно и запрос UAC.",
-                        false,
-                    ),
-                    Err(error) => {
-                        self.message(format!("Windows отклонила запуск ({error})."), true)
-                    }
-                }
-            }
             Err(error) => self.message(
                 format!("Запуск не удался ({error}). Попробуйте отдельную среду."),
                 true,
@@ -244,10 +345,8 @@ impl Launcher {
     }
 
     fn select_path(&mut self, path: PathBuf) {
-        if profile::extension_is(&path, "msi") {
-            self.isolate = true;
-            self.sandbox_options.single_file = true;
-        }
+        self.isolate = profile::Application::detect(&path).is_none();
+        self.sandbox_options.single_file = profile::extension_is(&path, "msi");
         self.share_folder = false;
         self.sandbox_input = sandbox::local_path(&path).ok();
         self.selection = Some(path);
@@ -409,12 +508,12 @@ impl Launcher {
             }
         });
 
-        let msi = self
+        let native_profile = self
             .selection
-            .as_ref()
-            .is_some_and(|path| profile::extension_is(path, "msi"));
-        ui.add_enabled_ui(!msi, |ui| {
-            ui.radio_value(&mut self.isolate, false, "Запуск на ПК");
+            .as_deref()
+            .and_then(profile::Application::detect);
+        ui.add_enabled_ui(native_profile.is_some(), |ui| {
+            ui.radio_value(&mut self.isolate, false, "Отдельный профиль");
         });
         ui.radio_value(&mut self.isolate, true, "Windows Sandbox");
         if self.isolate {
@@ -440,19 +539,7 @@ impl Launcher {
             ui.add_enabled_ui(!self.host.is_null(), |ui| {
                 ui.checkbox(&mut self.embed, "Встроить совместимое окно");
             });
-            if let Some(path) = &self.selection {
-                if let Some(app) = profile::Application::detect(path) {
-                    ui.colored_label(
-                        MUTED,
-                        format!("{} запустится с отдельным профилем.", app.name),
-                    );
-                } else {
-                    ui.colored_label(
-                        MUTED,
-                        "Параметры второго запуска определяет сама программа.",
-                    );
-                }
-            }
+            ui.colored_label(MUTED, "Каждый запуск использует новую папку профиля.");
         }
 
         let sandbox_ready = !self.isolate
@@ -464,11 +551,11 @@ impl Launcher {
             && self.docked.is_none()
             && self.sandbox_job.is_none()
             && sandbox_ready
-            && (self.isolate || !msi);
+            && (self.isolate || native_profile.is_some());
         let label = if self.isolate {
             "Запустить в песочнице"
         } else {
-            "Открыть программу"
+            "Открыть второй экземпляр"
         };
         let launch = egui::Button::new(RichText::new(label).color(BACKGROUND).strong())
             .fill(ACCENT)
@@ -485,10 +572,14 @@ impl Launcher {
             [ui.available_width(), 34.0],
             egui::TextEdit::singleline(&mut self.key_input)
                 .char_limit(512)
-                .hint_text("Вставьте ключ с сайта"),
+                .hint_text("Ключ из 10 символов"),
         );
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if ui.button("Активировать").clicked() || enter {
+        if ui
+            .add_enabled(self.online_job.is_none(), egui::Button::new("Активировать"))
+            .clicked()
+            || enter
+        {
             self.activate();
         }
 
@@ -515,6 +606,7 @@ impl eframe::App for Launcher {
             self.expiry = None;
             self.key_error = Some(license::KeyError::Expired.message().into());
         }
+        self.poll_online();
         self.poll_sandbox();
         self.poll_window();
 
@@ -540,8 +632,26 @@ impl eframe::App for Launcher {
                     painter.rect_stroke(front, 3.0, line, egui::StrokeKind::Inside);
                     ui.label(RichText::new("Two Windows in One").size(21.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let update_label = self.update_release.as_ref().map_or_else(
+                            || "Обновления".to_owned(),
+                            |release| {
+                                let action = if self.update_installer.is_some() {
+                                    "Установить"
+                                } else {
+                                    "Скачать"
+                                };
+                                format!("{action} {}", release.version)
+                            },
+                        );
+                        let idle = self.online_job.is_none() && self.sandbox_job.is_none();
+                        if ui
+                            .add_enabled(idle, egui::Button::new(update_label))
+                            .clicked()
+                        {
+                            self.update_action(ctx);
+                        }
                         if ui.button("Получить ключ на сайте").clicked()
-                            && let Err(error) = native::open_external(OsStr::new(SITE))
+                            && let Err(error) = native::open_external(OsStr::new(online::SITE))
                         {
                             self.message(error.to_string(), true);
                         }
@@ -619,11 +729,13 @@ impl eframe::App for Launcher {
                     );
                 }
             });
-        ctx.request_repaint_after(if self.pending.is_some() || self.sandbox_job.is_some() {
-            Duration::from_millis(150)
-        } else {
-            Duration::from_secs(1)
-        });
+        ctx.request_repaint_after(
+            if self.pending.is_some() || self.sandbox_job.is_some() || self.online_job.is_some() {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(1)
+            },
+        );
     }
 }
 

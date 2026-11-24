@@ -45,11 +45,36 @@ async function verify(env, data, now) {
   }
 }
 
+const codeAlphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+function startOfDay(now) {
+  return Math.floor((now + moscowOffset) / day) * day - moscowOffset;
+}
+
+async function shortCode(env, now) {
+  const seed = await crypto.subtle.digest("SHA-256", encoder.encode("twi-short-code-v1:" + env.TWI_CAPTCHA_SECRET));
+  const key = await crypto.subtle.importKey("raw", seed, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(String(startOfDay(now)))));
+  return Array.from(digest.subarray(0, 10), byte => codeAlphabet[byte & 31]).join("");
+}
+
+async function verifyCode(env, raw, now) {
+  if (typeof raw !== "string" || raw.length > 32) return false;
+  const code = raw.replace(/[ -]/g, "").toUpperCase();
+  if (!/^[2-9A-HJ-NP-Z]{10}$/.test(code)) return false;
+  const expected = await shortCode(env, now);
+  let mismatch = 0;
+  for (let index = 0; index < code.length; index++) {
+    mismatch |= code.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return mismatch === 0;
+}
+
 async function dailyKey(env, now) {
   const pem = env.TWI_SIGNING_PRIVATE_PEM.replace(/-----[^-]+-----|\s/g, "");
   const key = await crypto.subtle.importKey("pkcs8", bytesFromBase64(pem),
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-  const starts = Math.floor((now + moscowOffset) / day) * day - moscowOffset;
+  const starts = startOfDay(now);
   const ends = starts + day;
   const payload = `TWI1.${starts}.${ends}`;
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(payload));
@@ -114,10 +139,16 @@ export function makeWorker(assets = {}) {
       const now = Math.floor(Date.now() / 1000);
       try {
         if (url.pathname === "/api/challenge") return json(await challenge(env, now));
+        if (url.pathname === "/api/activate") {
+          const data = await readAnswer(request);
+          if (!(await verifyCode(env, data?.code, now))) return json({ error: "code" }, 422);
+          return json(await dailyKey(env, now));
+        }
         if (url.pathname !== "/api/key") return json({ error: "not_found" }, 404);
         const data = await readAnswer(request);
         if (!(await verify(env, data, now))) return json({ error: "captcha" }, 422);
-        return json(await dailyKey(env, now));
+        const [grant, code] = await Promise.all([dailyKey(env, now), shortCode(env, now)]);
+        return json({ ...grant, code: code.slice(0, 5) + "-" + code.slice(5) });
       } catch {
         return json({ error: "unavailable" }, 503);
       }
