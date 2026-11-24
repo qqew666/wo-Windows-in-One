@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/build-backend.mjs"
+    "build": "node scripts/build-backend.mjs",
+    "start": "node scripts/serve-site.mjs"
   },
   "devDependencies": {
     "esbuild": "0.25.12"
