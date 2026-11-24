@@ -4,7 +4,7 @@ version = "2.3.0"
 edition = "2024"
 authors = ["qqew666"]
 repository = "https://github.com/qqew666/wo-Windows-in-One"
-homepage = "https://twi.sillypetunia8.chatgpt.site/"
+homepage = "https://twi.wtowindowszuz.chatgpt.site/"
 description = "Separate application profiles and optional Windows window embedding"
 
 [[bin]]

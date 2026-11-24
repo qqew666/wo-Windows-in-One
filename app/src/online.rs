@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 
-pub const SITE: &str = "https://twi.sillypetunia8.chatgpt.site/";
-const ACTIVATION_API: &str = "https://two-windows.sillypetunia8.chatgpt.site/api/activate";
+pub const SITE: &str = "https://twi.wtowindowszuz.chatgpt.site/";
+const ACTIVATION_API: &str = "https://two-windows.wtowindowszuz.chatgpt.site/api/activate";
 pub const RELEASES_PAGE: &str = "https://github.com/qqew666/wo-Windows-in-One/releases/latest";
 const REPO: &str = "https://github.com/qqew666/wo-Windows-in-One";
 const RELEASE_API: &str = "https://api.github.com/repos/qqew666/wo-Windows-in-One/releases/latest";

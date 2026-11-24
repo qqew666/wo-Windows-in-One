@@ -4,7 +4,7 @@
 
 Лаунчер на Rust для Windows 10 и 11 x64. Он откроет второй экземпляр с отдельными данными и может встроить совместимое окно в рабочую область. Для приложений без режима отдельных профилей доступна Windows Sandbox.
 
-[Скачать установщик](https://github.com/qqew666/wo-Windows-in-One/releases/latest/download/Two-Windows-in-One-Setup.exe) · [Портативная сборка](https://github.com/qqew666/wo-Windows-in-One/releases/latest) · [Сайт и ключ](https://twi.sillypetunia8.chatgpt.site/)
+[Скачать установщик](https://github.com/qqew666/wo-Windows-in-One/releases/latest/download/Two-Windows-in-One-Setup.exe) · [Портативная сборка](https://github.com/qqew666/wo-Windows-in-One/releases/latest) · [Сайт и ключ](https://twi.wtowindowszuz.chatgpt.site/)
 
 ## Установка и активация
 

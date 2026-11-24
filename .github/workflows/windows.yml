@@ -91,4 +91,4 @@ jobs:
         run: |
           gh release create "$TAG" Two-Windows-in-One-win-x64.zip Two-Windows-in-One-Setup.exe --verify-tag \
             --title "Two Windows in One $TAG" \
-            --notes $'Установщик и портативная сборка для Windows x64.\n\nРазработчик qqew666.\n\n[Сайт и ключ доступа](https://twi.sillypetunia8.chatgpt.site/).'
+            --notes $'Установщик и портативная сборка для Windows x64.\n\nРазработчик qqew666.\n\n[Сайт и ключ доступа](https://twi.wtowindowszuz.chatgpt.site/).'
